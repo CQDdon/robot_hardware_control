@@ -1,0 +1,787 @@
+#include "hardware_system_handler/hsh_node.hpp"
+#include "hardware_system_handler/state_init.hpp"
+#include "hardware_system_handler/state_wait_sensors.hpp"
+#include "hardware_system_handler/state_wait_homing.hpp"
+#include "hardware_system_handler/state_ready.hpp"
+#include "hardware_system_handler/state_running.hpp"
+#include "hardware_system_handler/state_fault.hpp"
+#include "hardware_system_handler/state_offline.hpp"
+#include "hardware_system_handler/state_stop.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <functional>
+#include <stdexcept>
+#include <sstream>
+#include <cstdlib>
+
+namespace
+{
+    constexpr size_t kActiveAxisLimit = 8;
+    constexpr int64_t kHomingTimeoutNs = 30000000000LL;
+    constexpr int64_t kHomingDoneDelayNs = 2000000000LL;
+
+    size_t active_axis_count(uint8_t axis_count)
+    {
+        return std::min<size_t>({static_cast<size_t>(axis_count), SHM_MAX_AXES, kActiveAxisLimit});
+    }
+
+    struct ShmDerivedState
+    {
+        bool has_error{false};
+        bool all_idle{false};
+    };
+
+    ShmDerivedState derive_shm_state(const HwiStateBlock &state)
+    {
+        ShmDerivedState out{};
+        const size_t count = active_axis_count(state.axis_count);
+        out.all_idle = true;
+        for (size_t i = 0; i < count; ++i)
+        {
+            const auto &axis = state.axes[i];
+            if (axis.error != 0)
+            {
+                out.has_error = true;
+            }
+            if (!is_axis_online(axis) || axis.odrive_state_summary != AxisStateSummary::Idle)
+            {
+                out.all_idle = false;
+            }
+        }
+        return out;
+    }
+
+    enum class FsmState
+    {
+        Unknown = -1,
+        Init = 0,
+        WaitSensors = 1,
+        WaitHoming = 2,
+        Ready = 3,
+        Running = 4,
+        Fault = 5,
+        Offline = 6,
+        Stop = 7
+    };
+
+    FsmState get_fsm_state()
+    {
+        if (HardwareSystemHandler::is_in_state<INIT>())
+            return FsmState::Init;
+        if (HardwareSystemHandler::is_in_state<WAIT_SENSORS>())
+            return FsmState::WaitSensors;
+        if (HardwareSystemHandler::is_in_state<WAIT_HOMING>())
+            return FsmState::WaitHoming;
+        if (HardwareSystemHandler::is_in_state<READY>())
+            return FsmState::Ready;
+        if (HardwareSystemHandler::is_in_state<RUNNING>())
+            return FsmState::Running;
+        if (HardwareSystemHandler::is_in_state<FAULT>())
+            return FsmState::Fault;
+        if (HardwareSystemHandler::is_in_state<OFFLINE>())
+            return FsmState::Offline;
+        if (HardwareSystemHandler::is_in_state<STOP>())
+            return FsmState::Stop;
+        return FsmState::Unknown;
+    }
+
+} // namespace
+
+namespace hardware_system_handler
+{
+
+    using namespace std::chrono_literals;
+
+    HshNode::HshNode() : rclcpp::Node("hsh_node")
+    {
+        if (!open_shared_memory())
+        {
+            throw std::runtime_error("Failed to open shared memory segments");
+        }
+
+        poll_timer_ = this->create_wall_timer(
+            100ms, std::bind(&HshNode::poll_shared_memory, this));
+        watch_dog_timer_ = this->create_wall_timer(
+            100ms, std::bind(&HshNode::EventHandler, this));
+        transmit_timer_ = this->create_wall_timer(
+            5ms, std::bind(&HshNode::ControlCommand, this));
+
+        RCLCPP_INFO(logger_, "HSH node initialized; polling shared memory every 100ms");
+
+        // Start FSM
+        RCLCPP_INFO(logger_, "Starting FSM...");
+        HardwareSystemHandler::start();
+
+        axis_error_pub_ = this->create_publisher<std_msgs::msg::String>("/hsh/axis_errors", 5000);
+        fsm_state_pub_ = this->create_publisher<std_msgs::msg::String>("/hsh/fsm_state", 10);
+    }
+
+    bool HshNode::open_shared_memory()
+    {
+        if (!shmitf_.open(false))
+        {
+            RCLCPP_FATAL(logger_, "Unable to open shared memory segments (%s, %s, %s, %s)",
+                         SHM_HWI_CMD_IF, SHM_HWI_STATE, SHM_HWI_STATE_DEBUG, SHM_HSH_CTRL);
+            return false;
+        }
+
+        RCLCPP_INFO(logger_, "Connected to shared memory segments (%s, %s, %s, %s)",
+                    SHM_HWI_CMD_IF, SHM_HWI_STATE, SHM_HWI_STATE_DEBUG, SHM_HSH_CTRL);
+        return true;
+    }
+
+    void HshNode::poll_shared_memory()
+    {
+        if (!shmitf_.ready())
+        {
+            RCLCPP_WARN_THROTTLE(logger_, *get_clock(), 5000,
+                                 "Shared memory not ready yet");
+            return;
+        }
+
+        auto *state = shmitf_.state();
+        if (!state)
+        {
+            RCLCPP_WARN_THROTTLE(logger_, *get_clock(), 5000,
+                                 "Shared memory state pointer is null");
+            return;
+        }
+
+        const auto derived = derive_shm_state(*state);
+        const size_t count = active_axis_count(state->axis_count);
+        if (auto *ctrl = shmitf_.control())
+        {
+            ctrl->debug_enable = debug_mode_ ? 1 : 0;
+        }
+
+        const bool state_looks_initialized =
+            (state->axis_count > 0) || (state->sequence_id != 0) || (state->timestamp_ns != 0);
+        const bool axis_count_valid = state->axis_count <= SHM_MAX_AXES;
+        const bool init_ready = state_looks_initialized && axis_count_valid;
+
+        if (state_looks_initialized && !axis_count_valid)
+        {
+            RCLCPP_WARN_THROTTLE(logger_, *get_clock(), 5000,
+                                 "Shared memory axis_count out of range: %u", state->axis_count);
+        }
+
+        if (init_ready)
+        {
+            if (error_checked_ && !derived.has_error)
+            {
+                RCLCPP_INFO(logger_, "System recovered (no errors detected)");
+                error_checked_ = false;
+            }
+
+            if (HardwareSystemHandler::is_in_state<INIT>())
+            {
+                HardwareSystemHandler::dispatch(EvInitDone{});
+            }
+            else if (!error_checked_ && derived.has_error)
+            {
+                RCLCPP_ERROR(logger_, "Error detected in system!");
+                error_checked_ = true;
+
+                // Log detailed errors
+                for (size_t i = 0; i < count; ++i)
+                {
+                    uint32_t err = state->axes[i].error;
+                    if (err != 0)
+                    {
+                        uint8_t axis_error = (err >> 0) & 0xFF;
+                        uint8_t motor_error = (err >> 8) & 0xFF;
+                        uint8_t encoder_error = (err >> 16) & 0xFF;
+                        uint8_t controller_error = (err >> 24) & 0xFF;
+
+                        RCLCPP_ERROR(logger_, "Axis[%zu] error: axis=%u motor=%u encoder=%u controller=%u",
+                                     i, axis_error, motor_error, encoder_error, controller_error);
+                    }
+                }
+
+                HardwareSystemHandler::dispatch(EvAxisError{});
+            }
+            else if (error_checked_ && derived.has_error)
+            {
+                // Already handled, waiting for auto recovery
+            }
+        }
+    }
+
+    bool HshNode::SensorActive()
+    {
+        /*======================TESTING====================*/
+        if (!using_sensor)                                                      
+        {
+            return true;
+        }
+        /*======================TESTING====================*/
+        const auto *sensor_state = shmitf_.sensor_state();
+        if (!sensor_state)
+        {
+            return false;
+        }
+        sensor_count_ = sensor_state->sensor_count;
+                // RCLCPP_INFO(logger_,"Sensor count via SHM:%u", sensor_count_);
+        if (sensor_count_ == 0)
+        {
+            return false;
+        }
+
+        for (size_t i = 0; i < sensor_count_ && i < SHM_MAX_SENSORS; ++i)
+        {
+            const auto &sensor = sensor_state->sensors[i];
+            if (sensor.online == 0)
+            {
+                return false;
+            }
+            if (sensor.status != SensorStatus::Active)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool HshNode::StartHoming()
+    {
+        if (!homing_required_)
+            return false;
+        if (homing_in_progress_)
+            return false;
+
+        if (!SensorActive())
+            return false;
+
+        auto *ctrl = shmitf_.control();
+        auto *state = shmitf_.state();
+        const auto *cmd_if = shmitf_.cmd_if();
+
+        if (!ctrl || !state || !cmd_if)
+            return false;
+
+        const auto now = get_clock()->now();
+        const size_t count = active_axis_count(state->axis_count);
+        ctrl->axis_count = static_cast<uint8_t>(count);
+        for (size_t i = count; i < SHM_MAX_AXES; ++i)
+        {
+            ctrl->axes[i].action = ControlAction::Idle;
+        }
+        bool sent = false;
+        for (size_t i = 0; i < count; ++i)
+        {
+            if (cmd_if->axes[i].interface != CommandInterface::Position)
+                continue;
+            if (homing_command_sent_[i] || homing_done_[i])
+                continue;
+            ctrl->axes[i].action = ControlAction::Homing;
+            homing_command_sent_[i] = true;
+            homing_command_time_ns_[i] = now.nanoseconds();
+            sent = true;
+        }
+
+        if (sent)
+        {
+            homing_in_progress_ = true;
+            RCLCPP_INFO(logger_, "StartHoming: sent homing command to %zu axes", count);
+        }
+        return sent;
+    }
+
+    float HshNode::CommandErrorRate()
+    {
+        float max_rel_error = 0.0f;
+
+        const auto *cmd_if = shmitf_.cmd_if();
+        const auto *state = shmitf_.state();
+
+        const size_t count = active_axis_count(state->axis_count);
+        for (size_t i = 0; i < count; ++i)
+        {
+            float cmd = 0.0f;
+            float fb = 0.0f;
+
+            if (cmd_if->axes[i].interface == CommandInterface::Velocity)
+            {
+                cmd = static_cast<float>(cmd_if->axes[i].value);
+                fb = static_cast<float>(state->axes[i].velocity);
+            }
+            else
+            {
+                cmd = static_cast<float>(cmd_if->axes[i].value);
+                fb = static_cast<float>(state->axes[i].position);
+            }
+
+            // Tránh chia cho 0
+            if (std::abs(cmd) < 1e-6f)
+                continue;
+
+            float rel_error = std::abs(cmd - fb) / std::abs(cmd);
+
+            if (rel_error > max_rel_error)
+                max_rel_error = rel_error;
+        }
+
+        return max_rel_error;
+    }
+
+    bool HshNode::CommandVerify()
+    {
+        const auto *cmd_if = shmitf_.cmd_if();
+        const auto *state = shmitf_.state();
+        const size_t count = active_axis_count(state->axis_count);
+        for (size_t i = 0; i < count; ++i)
+        {
+            if (cmd_if->axes[i].interface == CommandInterface::Velocity)
+            {
+                if (std::abs(cmd_if->axes[i].value) > MAX_AXIS_VEL)
+                {
+                    RCLCPP_ERROR(logger_, "Invalid command for Odrive, user value: %f (RPS), max value: %f (RPS)", cmd_if->axes[i].value, MAX_AXIS_VEL);
+                    return false;
+                }
+            }
+            else if (cmd_if->axes[i].interface == CommandInterface::Position)
+            {
+                if (std::abs(cmd_if->axes[i].value) > MAX_AXIS_POS)
+                {
+                    RCLCPP_ERROR(logger_, "Invalid command for Odrive, user value: %f (Rad), max value: %f (Rad)", cmd_if->axes[i].value, MAX_AXIS_POS);
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    void HshNode::EventHandler()
+    {
+        auto *ctrl = shmitf_.control();
+        const auto *state = shmitf_.state();
+        const auto *cmd_if = shmitf_.cmd_if();
+        if (!state || !ctrl)
+        {
+            return;
+        }
+
+        const bool sensors_active = SensorActive();
+
+        auto log_event = [&](const char *name) {
+            RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "Dispatch event: %s", name);
+        };
+
+        const auto now = get_clock()->now();
+        const size_t count = active_axis_count(state->axis_count);
+        const bool state_looks_initialized =
+            (state->axis_count > 0) || (state->sequence_id != 0) || (state->timestamp_ns != 0);
+
+        const auto current_state = get_fsm_state();
+        if (static_cast<int>(current_state) != last_fsm_state_)
+        {
+            const int prev_fsm_state = last_fsm_state_;
+            last_fsm_state_ = static_cast<int>(current_state);
+            if (current_state == FsmState::WaitSensors)
+            {
+                wait_sensors_start_ = now;
+                sensors_ok_sent_ = false;
+            }
+            if (current_state == FsmState::WaitHoming)
+            {
+                wait_homing_start_ = now;
+                homing_timeout_sent_ = false;
+            }
+            if (current_state == FsmState::Fault)
+            {
+                fault_enter_time_ = now;
+                clear_error_time_ = now;
+                clear_error_pending_ = true;
+            }
+            if (current_state == FsmState::Ready)
+            {
+                clear_error_pending_ = false;
+                debug_mode_ = false;
+                error_events_.clear();
+            }
+            if (current_state == FsmState::Offline)
+            {
+                offline_from_fault_ = (prev_fsm_state == static_cast<int>(FsmState::Fault));
+                axis_online_sent_ = false;
+            }
+            else
+            {
+                offline_from_fault_ = false;
+            }
+            
+            // Publish FSM state
+            if (fsm_state_pub_) {
+                std_msgs::msg::String msg;
+                const char* state_names[] = {
+                    "Init", "WaitSensors", "WaitHoming", "Ready", 
+                    "Running", "Fault", "Offline", "Stop"
+                };
+                int state_idx = static_cast<int>(current_state);
+                if (state_idx >= 0 && state_idx < 8) {
+                    msg.data = state_names[state_idx];
+                } else {
+                    msg.data = "Unknown";
+                }
+                fsm_state_pub_->publish(msg);
+            }
+        }
+
+        if (!has_timestamp_ || state->timestamp_ns != last_timestamp_ns_)
+        {
+            last_timestamp_ns_ = state->timestamp_ns;
+            last_timestamp_change_time_ = now;
+            has_timestamp_ = true;
+            state_live_ = true;
+        }
+
+        bool any_offline = false;
+        bool any_error = false;
+        bool any_homing = false;
+        bool homing_needed = false;
+        bool homing_done = false;
+        bool all_required_homed = true;
+        [[maybe_unused]] bool all_offline = (count > 0);
+        [[maybe_unused]] bool any_running = false;
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            const auto &axis = state->axes[i];
+            const bool online = is_axis_online(axis);
+            if (!online)
+            {
+                any_offline = true;
+                homing_done = false;
+                if (cmd_if != nullptr &&
+                    cmd_if->axes[i].interface == CommandInterface::Position)
+                {
+                    homing_done_[i] = false;
+                }
+            }
+            else
+            {
+                all_offline = false;
+            }
+
+            if (axis.error != 0)
+            {
+                any_error = true;
+            }
+
+            if (axis.odrive_state_summary == AxisStateSummary::Homing)
+            {
+                any_homing = true;
+                if (!homing_started_[i])
+                {
+                    homing_started_[i] = true;
+                    homing_command_time_ns_[i] = now.nanoseconds();
+                }
+                homing_done_[i] = false;
+                homing_done = false;
+            }
+
+            if (axis.odrive_state_summary == AxisStateSummary::Running)
+            {
+                any_running = true;
+            }
+
+            const bool requires_homing =
+                (cmd_if != nullptr) && (cmd_if->axes[i].interface == CommandInterface::Position);
+            if (requires_homing)
+            {
+                homing_needed = true;
+                const int64_t elapsed_ns = now.nanoseconds() - homing_command_time_ns_[i];
+                const bool idle_after_delay =
+                    homing_command_sent_[i] &&
+                    homing_command_time_ns_[i] > 0 &&
+                    elapsed_ns > kHomingDoneDelayNs &&
+                    axis.odrive_state_summary == AxisStateSummary::Idle;
+                if (idle_after_delay)
+                {
+                    homing_done_[i] = true;
+                }
+                if (!homing_done_[i])
+                {
+                    all_required_homed = false;
+                }
+            }
+        }
+
+        if (homing_needed)
+        {
+            homing_done = all_required_homed;
+        }
+
+
+        if (any_error)
+        {
+            error_events_.push_back(now);
+        }
+        while (!error_events_.empty() &&
+               (now - error_events_.front()).nanoseconds() > 10000000000LL)
+        {
+            error_events_.pop_front();
+        }
+        const bool error_rate_exceeded = error_events_.size() >= 3;
+
+        const bool in_fault = (current_state == FsmState::Fault);
+        const bool safe_state =
+            (current_state == FsmState::Init) ||
+            (current_state == FsmState::WaitSensors) ||
+            (current_state == FsmState::WaitHoming) ||
+            (current_state == FsmState::Ready) ||
+            (current_state == FsmState::Running);
+
+        if (safe_state && any_offline)
+        {
+            log_event("EvAxisOffline");
+            HardwareSystemHandler::dispatch(EvAxisOffline{});
+        }
+
+        if (safe_state && any_error && !error_checked_)
+        {
+            log_event("EvAxisError");
+            HardwareSystemHandler::dispatch(EvAxisError{});
+        }
+
+        if (any_offline)
+        {
+            std::ostringstream oss;
+            oss << "Axis offline detected; timestamp_ns=" << state->timestamp_ns << " offline_axes=[";
+            bool first = true;
+            for (size_t i = 0; i < count; ++i)
+            {
+                const auto &axis = state->axes[i];
+                if (is_axis_online(axis))
+                    continue;
+                if (!first)
+                    oss << ",";
+                oss << i;
+                first = false;
+            }
+            oss << "]";
+            RCLCPP_WARN_THROTTLE(logger_, *get_clock(), 1000, "%s", oss.str().c_str());
+        }
+
+        if (any_offline)
+        {
+            if (!offline_seen_)
+            {
+                offline_seen_ = true;
+            }
+            axis_online_sent_ = false;
+        }
+        else
+        {
+            offline_seen_ = false;
+        }
+
+        if (current_state == FsmState::WaitSensors)
+        {
+            if (!sensors_ok_sent_ && sensors_active)
+            {
+                log_event("EvSensorsOk");
+                HardwareSystemHandler::dispatch(EvSensorsOk{});
+                sensors_ok_sent_ = true;
+            }
+
+            if (!sensors_ok_sent_ &&
+                (now - wait_sensors_start_).nanoseconds() > 1000000000LL)
+            {
+                log_event("EvSensorsTimeout");
+                HardwareSystemHandler::dispatch(EvSensorsTimeout{});
+            }
+        }
+
+        if (current_state == FsmState::Offline && !any_offline && !axis_online_sent_)
+        {
+            if (offline_from_fault_)
+            {
+                log_event("EvAxisOnlineFault");
+                HardwareSystemHandler::dispatch(EvAxisOnlineFault{});
+            }
+            else
+            {
+                log_event("EvAxisOnline");
+                HardwareSystemHandler::dispatch(EvAxisOnline{});
+            }
+            axis_online_sent_ = true;
+        }
+
+        if (in_fault)
+        {
+            for (size_t i = 0; i < count; ++i)
+            {
+                if (state->axes[i].error != 0)
+                {
+                    ctrl->axes[i].action = ControlAction::ClearErrors;
+                }
+            }
+
+            if (!any_error && clear_error_pending_ && sensors_active)
+            {
+                log_event("EvClearError");
+                HardwareSystemHandler::dispatch(EvClearError{});
+                clear_error_pending_ = false;
+            }
+
+            const bool clear_timeout_with_error =
+                clear_error_pending_ &&
+                (now - clear_error_time_).nanoseconds() > 500000000LL && any_error;
+            if (error_rate_exceeded || clear_timeout_with_error)
+            {
+                if (error_rate_exceeded)
+                {
+                    RCLCPP_ERROR(logger_, "FAULT too frequent; entering STOP");
+                }
+                if (clear_timeout_with_error)
+                {
+                    RCLCPP_ERROR(logger_, "Clear error timeout while error persists; entering STOP");
+                }
+                log_event("EvCriticalError");
+                HardwareSystemHandler::dispatch(EvCriticalError{});
+                debug_mode_ = true;
+                clear_error_pending_ = false;
+            }
+        }
+
+        if (current_state == FsmState::WaitHoming && homing_required_)
+        {
+            ctrl->motion_enable = false;
+            if (any_offline)
+            {
+                return;
+            }
+            if (!homing_timeout_sent_ &&
+                (now - wait_homing_start_).nanoseconds() > kHomingTimeoutNs)
+            {
+                log_event("EvHomingTimeout");
+                HardwareSystemHandler::dispatch(EvHomingTimeout{});
+                homing_timeout_sent_ = true;
+                return;
+            }
+            StartHoming();
+        }
+
+        if (current_state == FsmState::WaitHoming && homing_required_ &&
+            homing_done && !any_homing && !any_offline)
+        {
+            log_event("EvHomingDone");
+            HardwareSystemHandler::dispatch(EvHomingDone{});
+            ctrl->motion_enable = true;
+            homing_required_ = false;
+            homing_in_progress_ = false;
+            homing_command_sent_.fill(false);
+            homing_started_.fill(false);
+            homing_done_.fill(false);
+        }
+
+        if (current_state == FsmState::Ready)
+        {
+            if (homing_required_)
+            {
+                ctrl->motion_enable = false;
+                log_event("EvHomingRequired");
+                HardwareSystemHandler::dispatch(EvHomingRequired{});
+                return;
+            }
+
+            if (CommandVerify())
+            {
+                log_event("EvEnableCmd");
+                HardwareSystemHandler::dispatch(EvEnableCmd{});
+                ctrl->motion_enable = true;
+            }
+        }
+
+        if (current_state == FsmState::Running)
+        {
+            if (!sensors_active)
+            {
+                log_event("EvSensorsTimeout");
+                HardwareSystemHandler::dispatch(EvSensorsTimeout{});
+            }
+        }
+
+        if (current_state == FsmState::Stop)
+        {
+            motion_allowed_.store(false);
+            ctrl->motion_enable = false;
+            for (size_t i = 0; i < count; ++i)
+            {
+                ctrl->axes[i].action = ControlAction::Idle;
+            }
+        }
+
+        if (debug_mode_ && axis_error_pub_ && any_error)
+        {
+            std_msgs::msg::String msg;
+            std::ostringstream oss;
+            oss << "axis_errors: ";
+            bool first = true;
+            for (size_t i = 0; i < count; ++i)
+            {
+                if (state->axes[i].error == 0)
+                    continue;
+                if (!first)
+                    oss << ", ";
+                oss << "axis[" << i << "]=0x" << std::hex << state->axes[i].error << std::dec;
+                first = false;
+            }
+            msg.data = oss.str();
+            axis_error_pub_->publish(msg);
+        }
+    }
+
+    void HshNode::ControlCommand()
+    {
+        auto *ctrl = shmitf_.control();
+        const auto *cmd_if = shmitf_.cmd_if();
+        const auto *state = shmitf_.state();
+
+        if (!ctrl || !cmd_if || !state)
+        {
+            return;
+        }
+        if (!HshNode::SensorActive())
+        {
+            return;
+        }
+
+        const size_t count = active_axis_count(state->axis_count);
+        ctrl->axis_count = static_cast<uint8_t>(count);
+        ctrl->timestamp_ns = static_cast<uint64_t>(get_clock()->now().nanoseconds());
+        ctrl->sequence_id += 1;
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            if (ctrl->motion_enable)
+            {
+                if (HshNode::CommandVerify())
+                {
+                    float target = cmd_if->axes[i].value;
+
+                    if (cmd_if->axes[i].interface == CommandInterface::Position ||
+                        cmd_if->axes[i].interface == CommandInterface::Velocity)
+                    {
+                        target = target / (2.0f * 3.141592f);
+                    }
+                    ctrl->axes[i].action = ControlAction::ClosedLoop;
+                    ctrl->axes[i].target = target;
+                    RCLCPP_DEBUG_THROTTLE(logger_, *get_clock(), 500,
+                                          "ControlCommand: axis=%zu action=ClosedLoop target=%.3f",
+                                          i, static_cast<double>(ctrl->axes[i].target));
+                }
+            }
+        }
+    }
+} // namespace hardware_system_handler
+
+int main(int argc, char **argv)
+{
+    rclcpp::init(argc, argv);
+    rclcpp::spin(std::make_shared<hardware_system_handler::HshNode>());
+    rclcpp::shutdown();
+    return 0;
+}
