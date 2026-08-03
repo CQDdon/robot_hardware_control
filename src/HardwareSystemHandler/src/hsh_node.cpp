@@ -93,8 +93,57 @@ namespace hardware_system_handler
 
     using namespace std::chrono_literals;
 
+    namespace
+    {
+        constexpr auto kStateStaleTimeout = 500ms;
+        constexpr auto kCommandStaleTimeout = 100ms;
+        constexpr auto kSensorStaleTimeout = 500ms;
+    }
+
+    bool HshNode::refresh_state()
+    {
+        HwiStateBlock snapshot{};
+        if (shmitf_.read_state(snapshot))
+        {
+            last_state_ = snapshot;
+            have_state_snapshot_ = true;
+            last_state_snapshot_time_ = get_clock()->now();
+        }
+        return have_state_snapshot_ && get_clock()->now() - last_state_snapshot_time_ <= kStateStaleTimeout;
+    }
+
+    bool HshNode::refresh_cmd_if()
+    {
+        HwiCommandIfBlock snapshot{};
+        if (shmitf_.read_cmd_if(snapshot))
+        {
+            last_cmd_if_ = snapshot;
+            have_cmd_snapshot_ = true;
+            last_cmd_snapshot_time_ = get_clock()->now();
+        }
+        return have_cmd_snapshot_ && get_clock()->now() - last_cmd_snapshot_time_ <= kCommandStaleTimeout;
+    }
+
+    bool HshNode::refresh_sensor_state()
+    {
+        HwiSensorStateBlock snapshot{};
+        if (shmitf_.read_sensor_state(snapshot))
+        {
+            last_sensor_state_ = snapshot;
+            have_sensor_snapshot_ = true;
+            last_sensor_snapshot_time_ = get_clock()->now();
+        }
+        return have_sensor_snapshot_ && get_clock()->now() - last_sensor_snapshot_time_ <= kSensorStaleTimeout;
+    }
+
     HshNode::HshNode() : rclcpp::Node("hsh_node")
     {
+        bypass_position_homing_ = this->declare_parameter<bool>("bypass_position_homing", false);
+        homing_required_ = !bypass_position_homing_;
+        if (bypass_position_homing_)
+        {
+            RCLCPP_WARN(logger_, "Position homing is bypassed by parameter; only use this for a known-safe mechanism.");
+        }
         if (!open_shared_memory())
         {
             throw std::runtime_error("Failed to open shared memory segments");
@@ -140,20 +189,17 @@ namespace hardware_system_handler
             return;
         }
 
-        auto *state = shmitf_.state();
-        if (!state)
+        if (!refresh_state())
         {
             RCLCPP_WARN_THROTTLE(logger_, *get_clock(), 5000,
                                  "Shared memory state pointer is null");
             return;
         }
 
+        const auto *state = &last_state_;
         const auto derived = derive_shm_state(*state);
         const size_t count = active_axis_count(state->axis_count);
-        if (auto *ctrl = shmitf_.control())
-        {
-            ctrl->debug_enable = debug_mode_ ? 1 : 0;
-        }
+        desired_control_.debug_enable = debug_mode_ ? 1 : 0;
 
         const bool state_looks_initialized =
             (state->axis_count > 0) || (state->sequence_id != 0) || (state->timestamp_ns != 0);
@@ -216,11 +262,11 @@ namespace hardware_system_handler
             return true;
         }
         /*======================TESTING====================*/
-        const auto *sensor_state = shmitf_.sensor_state();
-        if (!sensor_state)
+        if (!refresh_sensor_state())
         {
             return false;
         }
+        const auto *sensor_state = &last_sensor_state_;
         sensor_count_ = sensor_state->sensor_count;
                 // RCLCPP_INFO(logger_,"Sensor count via SHM:%u", sensor_count_);
         if (sensor_count_ == 0)
@@ -254,12 +300,11 @@ namespace hardware_system_handler
         if (!SensorActive())
             return false;
 
-        auto *ctrl = shmitf_.control();
-        auto *state = shmitf_.state();
-        const auto *cmd_if = shmitf_.cmd_if();
-
-        if (!ctrl || !state || !cmd_if)
+        if (!refresh_state() || !refresh_cmd_if())
             return false;
+        auto *ctrl = &desired_control_;
+        const auto *state = &last_state_;
+        const auto *cmd_if = &last_cmd_if_;
 
         const auto now = get_clock()->now();
         const size_t count = active_axis_count(state->axis_count);
@@ -286,6 +331,7 @@ namespace hardware_system_handler
             homing_in_progress_ = true;
             RCLCPP_INFO(logger_, "StartHoming: sent homing command to %zu axes", count);
         }
+        // EventHandler only updates desired_control_; ControlCommand publishes it.
         return sent;
     }
 
@@ -293,8 +339,9 @@ namespace hardware_system_handler
     {
         float max_rel_error = 0.0f;
 
-        const auto *cmd_if = shmitf_.cmd_if();
-        const auto *state = shmitf_.state();
+        if (!refresh_cmd_if() || !refresh_state()) return max_rel_error;
+        const auto *cmd_if = &last_cmd_if_;
+        const auto *state = &last_state_;
 
         const size_t count = active_axis_count(state->axis_count);
         for (size_t i = 0; i < count; ++i)
@@ -328,8 +375,9 @@ namespace hardware_system_handler
 
     bool HshNode::CommandVerify()
     {
-        const auto *cmd_if = shmitf_.cmd_if();
-        const auto *state = shmitf_.state();
+        if (!refresh_cmd_if() || !refresh_state()) return false;
+        const auto *cmd_if = &last_cmd_if_;
+        const auto *state = &last_state_;
         const size_t count = active_axis_count(state->axis_count);
         for (size_t i = 0; i < count; ++i)
         {
@@ -355,13 +403,21 @@ namespace hardware_system_handler
 
     void HshNode::EventHandler()
     {
-        auto *ctrl = shmitf_.control();
-        const auto *state = shmitf_.state();
-        const auto *cmd_if = shmitf_.cmd_if();
-        if (!state || !ctrl)
+        if (!refresh_state() || !refresh_cmd_if())
         {
+            desired_control_.motion_enable = false;
+            desired_control_.timestamp_ns = static_cast<uint64_t>(get_clock()->now().nanoseconds());
+            desired_control_.sequence_id += 1;
+            for (auto &axis : desired_control_.axes)
+            {
+                axis.action = ControlAction::Idle;
+                axis.target = 0.0f;
+            }
             return;
         }
+        auto *ctrl = &desired_control_;
+        const auto *state = &last_state_;
+        const auto *cmd_if = &last_cmd_if_;
 
         const bool sensors_active = SensorActive();
 
@@ -428,6 +484,27 @@ namespace hardware_system_handler
             }
         }
 
+        // Publish the current state on every watchdog cycle (10 Hz), not only
+        // on a transition.  A diagnostic subscriber started after bringup can
+        // therefore still observe RUNNING/FAULT/OFFLINE.
+        if (fsm_state_pub_)
+        {
+            std_msgs::msg::String msg;
+            switch (current_state)
+            {
+            case FsmState::Init: msg.data = "Init"; break;
+            case FsmState::WaitSensors: msg.data = "WaitSensors"; break;
+            case FsmState::WaitHoming: msg.data = "WaitHoming"; break;
+            case FsmState::Ready: msg.data = "Ready"; break;
+            case FsmState::Running: msg.data = "Running"; break;
+            case FsmState::Fault: msg.data = "Fault"; break;
+            case FsmState::Offline: msg.data = "Offline"; break;
+            case FsmState::Stop: msg.data = "Stop"; break;
+            default: msg.data = "Unknown"; break;
+            }
+            fsm_state_pub_->publish(msg);
+        }
+
         if (!has_timestamp_ || state->timestamp_ns != last_timestamp_ns_)
         {
             last_timestamp_ns_ = state->timestamp_ns;
@@ -486,7 +563,7 @@ namespace hardware_system_handler
                 any_running = true;
             }
 
-            const bool requires_homing =
+            const bool requires_homing = !bypass_position_homing_ &&
                 (cmd_if != nullptr) && (cmd_if->axes[i].interface == CommandInterface::Position);
             if (requires_homing)
             {
@@ -646,6 +723,22 @@ namespace hardware_system_handler
             }
         }
 
+        // WAIT_SENSORS always transitions through WAIT_HOMING in the legacy
+        // FSM.  For a configured spring-return brake this is only a transit
+        // state: leave it immediately without emitting a homing command.
+        if (current_state == FsmState::WaitHoming && bypass_position_homing_)
+        {
+            ctrl->motion_enable = false;
+            homing_required_ = false;
+            homing_in_progress_ = false;
+            homing_command_sent_.fill(false);
+            homing_started_.fill(false);
+            homing_done_.fill(false);
+            RCLCPP_WARN(logger_, "Bypassing WAIT_HOMING; dispatching EvHomingDone without CAN homing.");
+            HardwareSystemHandler::dispatch(EvHomingDone{});
+            return;
+        }
+
         if (current_state == FsmState::WaitHoming && homing_required_)
         {
             ctrl->motion_enable = false;
@@ -736,14 +829,22 @@ namespace hardware_system_handler
 
     void HshNode::ControlCommand()
     {
-        auto *ctrl = shmitf_.control();
-        const auto *cmd_if = shmitf_.cmd_if();
-        const auto *state = shmitf_.state();
-
-        if (!ctrl || !cmd_if || !state)
+        if (!refresh_state() || !refresh_cmd_if())
         {
+            desired_control_.motion_enable = false;
+            desired_control_.timestamp_ns = static_cast<uint64_t>(get_clock()->now().nanoseconds());
+            desired_control_.sequence_id += 1;
+            for (auto &axis : desired_control_.axes)
+            {
+                axis.action = ControlAction::Idle;
+                axis.target = 0.0f;
+            }
+            (void)shmitf_.write_control(desired_control_);
             return;
         }
+        auto *ctrl = &desired_control_;
+        const auto *cmd_if = &last_cmd_if_;
+        const auto *state = &last_state_;
         if (!HshNode::SensorActive())
         {
             return;
@@ -754,27 +855,58 @@ namespace hardware_system_handler
         ctrl->timestamp_ns = static_cast<uint64_t>(get_clock()->now().nanoseconds());
         ctrl->sequence_id += 1;
 
+        if (!HshNode::CommandVerify())
+        {
+            return;
+        }
+
         for (size_t i = 0; i < count; ++i)
         {
-            if (ctrl->motion_enable)
-            {
-                if (HshNode::CommandVerify())
-                {
-                    float target = cmd_if->axes[i].value;
+            const auto interface = cmd_if->axes[i].interface;
+            const bool is_brake_axis = interface == CommandInterface::Position;
 
-                    if (cmd_if->axes[i].interface == CommandInterface::Position ||
-                        cmd_if->axes[i].interface == CommandInterface::Velocity)
-                    {
-                        target = target / (2.0f * 3.141592f);
-                    }
-                    ctrl->axes[i].action = ControlAction::ClosedLoop;
-                    ctrl->axes[i].target = target;
-                    RCLCPP_DEBUG_THROTTLE(logger_, *get_clock(), 500,
-                                          "ControlCommand: axis=%zu action=ClosedLoop target=%.3f",
-                                          i, static_cast<double>(ctrl->axes[i].target));
-                }
+            // Position axes are spring-brake axes in this hardware profile.
+            // They are independent from wheel motion permission: a positive
+            // brake request closes the loop at its requested position, and a
+            // released brake explicitly returns its axis to IDLE.
+            // One-shot actions are owned by EventHandler and must remain in
+            // desired_control_ until their dedicated request/ack migration.
+            if (ctrl->axes[i].action == ControlAction::ClearErrors ||
+                ctrl->axes[i].action == ControlAction::Homing ||
+                ctrl->axes[i].action == ControlAction::FullCalib)
+            {
+                continue;
             }
+            if (cmd_if->axes[i].action == ControlAction::Idle)
+            {
+                ctrl->axes[i].action = ControlAction::Idle;
+                ctrl->axes[i].target = 0.0f;
+                continue;
+            }
+
+            // Velocity axes are wheel drives and remain gated by the HSH
+            // motion permission. Never let a disabled wheel retain a stale
+            // closed-loop target.
+            if (!is_brake_axis && !ctrl->motion_enable)
+            {
+                ctrl->axes[i].action = ControlAction::Idle;
+                ctrl->axes[i].target = 0.0f;
+                continue;
+            }
+
+            float target = cmd_if->axes[i].value;
+            if (interface == CommandInterface::Position ||
+                interface == CommandInterface::Velocity)
+            {
+                target = target / (2.0f * 3.141592f);
+            }
+            ctrl->axes[i].action = ControlAction::ClosedLoop;
+            ctrl->axes[i].target = target;
+            RCLCPP_DEBUG_THROTTLE(logger_, *get_clock(), 500,
+                                  "ControlCommand: axis=%zu action=ClosedLoop target=%.3f",
+                                  i, static_cast<double>(ctrl->axes[i].target));
         }
+        (void)shmitf_.write_control(desired_control_);
     }
 } // namespace hardware_system_handler
 

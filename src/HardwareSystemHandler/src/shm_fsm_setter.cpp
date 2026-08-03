@@ -1,4 +1,4 @@
-#include "odrive_can_interface/shared_memory.hpp"
+#include "hardware_ipc_common/shared_memory.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -79,7 +79,7 @@ int main(int argc, char **argv)
     axis_error = static_cast<uint32_t>(std::strtoul(argv[3], nullptr, 0));
   }
 
-  odrive_can_interface::SharedMemoryInterface shm;
+  hardware_ipc_common::SharedMemoryInterface shm;
   if (!shm.open(false))
   {
     std::cerr << "Failed to open SHM (" << SHM_HWI_CMD_IF << ", "

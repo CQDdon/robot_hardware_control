@@ -1,4 +1,4 @@
-#include "odrive_can_interface/shared_memory.hpp"
+#include "hardware_ipc_common/shared_memory.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -6,7 +6,7 @@
 #include <iostream>
 #include <thread>
 
-using namespace odrive_can_interface;
+using namespace hardware_ipc_common;
 
 int main(int argc, char **argv)
 {
@@ -33,20 +33,20 @@ int main(int argc, char **argv)
 
     while (true)
     {
-        const auto *state = shmitf.state();
-        if (!state)
+        HwiStateBlock state{};
+        if (!shmitf.read_state(state))
         {
             std::cerr << "Shared memory state is null\n";
             return 1;
         }
 
-        const size_t count = std::min<size_t>(state->axis_count, kMaxDisplayAxes);
+        const size_t count = std::min<size_t>(state.axis_count, kMaxDisplayAxes);
         std::cout << "\r";
         std::cout << "vel(rad/s): ";
         for (size_t i = 0; i < count; ++i)
         {
             std::cout << "A" << i << "=" << std::fixed << std::setprecision(2)
-                      << state->axes[i].velocity;
+                      << state.axes[i].velocity;
             if (i + 1 < count)
             {
                 std::cout << " | ";

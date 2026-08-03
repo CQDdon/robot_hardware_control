@@ -1,0 +1,10 @@
+std_msgs/Header header
+float32 steering_angle_rad
+float32 wheel_velocity_rad_s
+float32 speed_percentage
+float32 brake_percentage
+uint8 GEAR_NEUTRAL=0
+uint8 GEAR_DRIVE=1
+uint8 GEAR_REVERSE=2
+uint8 gear
+bool safe_command_active

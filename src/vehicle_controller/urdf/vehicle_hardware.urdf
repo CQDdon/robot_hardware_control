@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<!-- Minimal ros2_control description for two real ODrive axes.
+     It deliberately excludes SensorCAN and visual meshes so this bringup has
+     no dependency on the legacy swerve packages. -->
+<robot name="vehicle_hardware">
+  <ros2_control name="SwerveDrive" type="system">
+    <hardware>
+      <plugin>odrive_can_interface/OdriveCANSystem</plugin>
+      <param name="can_port">can0</param>
+      <param name="baud_rate">500000</param>
+    </hardware>
+
+    <!-- ODrive node 5: spring-return brake, confirmed from feedback CAN ID 0x0A9. -->
+    <joint name="RearRightDriver_Joint">
+      <command_interface name="position"/>
+      <!-- 0 = closed loop at position target; 1 = ODrive IDLE. -->
+      <command_interface name="idle"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <param name="id">5</param>
+    </joint>
+    <!-- ODrive node 4: wheel drive, confirmed from feedback CAN ID 0x089. -->
+    <joint name="RearRightWheel_Joint">
+      <command_interface name="velocity"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <param name="id">4</param>
+    </joint>
+  </ros2_control>
+</robot>

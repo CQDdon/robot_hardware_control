@@ -1,4 +1,4 @@
-#include "odrive_can_interface/shared_memory.hpp"
+#include "hardware_ipc_common/shared_memory.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -6,7 +6,7 @@
 #include <iostream>
 #include <thread>
 
-using namespace odrive_can_interface;
+using namespace hardware_ipc_common;
 
 static const char *iface_name(CommandInterface iface)
 {
@@ -50,20 +50,20 @@ int main(int argc, char **argv)
 
     while (true)
     {
-        const auto *cmd = shmitf.cmd_if();
-        if (!cmd)
+        HwiCommandIfBlock cmd{};
+        if (!shmitf.read_cmd_if(cmd))
         {
             std::cerr << "Shared memory cmd_if is null\n";
             return 1;
         }
 
-        const size_t count = std::min<size_t>(cmd->axis_count, kMaxDisplayAxes);
+        const size_t count = std::min<size_t>(cmd.axis_count, kMaxDisplayAxes);
         std::cout << "\r";
         std::cout << "cmd_if raw: ";
         for (size_t i = 0; i < count; ++i)
         {
             std::cout << "A" << i << "=" << std::fixed << std::setprecision(3)
-                      << cmd->axes[i].value << "," << iface_name(cmd->axes[i].interface);
+                      << cmd.axes[i].value << "," << iface_name(cmd.axes[i].interface);
             if (i + 1 < count)
             {
                 std::cout << " | ";

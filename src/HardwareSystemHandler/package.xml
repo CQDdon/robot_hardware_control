@@ -11,7 +11,7 @@
 
   <depend>rclcpp</depend>
   <depend>diagnostic_msgs</depend>
-  <depend>odrive_can_interface</depend>
+  <depend>hardware_ipc_common</depend>
   <depend>std_msgs</depend>
 
   <test_depend>ament_lint_auto</test_depend>

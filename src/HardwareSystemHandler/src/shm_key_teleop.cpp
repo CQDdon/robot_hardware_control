@@ -1,4 +1,4 @@
-#include "odrive_can_interface/shared_memory.hpp"
+#include "hardware_ipc_common/shared_memory.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -10,7 +10,7 @@
 #include <unistd.h>
 #include <sys/select.h>
 
-using namespace odrive_can_interface;
+using namespace hardware_ipc_common;
 
 class TermiosGuard
 {

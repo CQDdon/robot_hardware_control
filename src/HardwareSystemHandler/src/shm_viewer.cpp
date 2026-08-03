@@ -1,9 +1,9 @@
 #include <iostream>
 #include <iomanip>
 #include <cstdint>
-#include "odrive_can_interface/shared_memory.hpp"
+#include "hardware_ipc_common/shared_memory.hpp"
 
-using namespace odrive_can_interface;
+using namespace hardware_ipc_common;
 
 // ANSI color codes
 #define RESET   "\033[0m"
@@ -54,16 +54,20 @@ int main(int, char**)
         return 1;
     }
 
-    const auto* state = shmitf.state();
-    const auto* cmd_if = shmitf.cmd_if();
-    const auto* ctrl = shmitf.control();
-    const auto* state_dbg = shmitf.state_debug();
-
-    if (!state || !cmd_if || !ctrl)
+    HwiStateBlock state_data{};
+    HwiCommandIfBlock cmd_if_data{};
+    HshControlBlock ctrl_data{};
+    HwiStateDebugBlock state_dbg_data{};
+    if (!shmitf.read_state(state_data) || !shmitf.read_cmd_if(cmd_if_data) || !shmitf.read_control(ctrl_data))
     {
         std::cerr << RED << "✗ Failed to access shared memory blocks!" << RESET << std::endl;
         return 1;
     }
+    (void)shmitf.read_state_debug(state_dbg_data);
+    const auto* state = &state_data;
+    const auto* cmd_if = &cmd_if_data;
+    const auto* ctrl = &ctrl_data;
+    const auto* state_dbg = &state_dbg_data;
 
     // Print header
     std::cout << BOLD << CYAN << "╔═══════════════════════════════════════════════════════════════════╗" << RESET << std::endl;

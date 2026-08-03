@@ -1,4 +1,4 @@
-#include "odrive_can_interface/shared_memory.hpp"
+#include "hardware_ipc_common/shared_memory.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -6,7 +6,7 @@
 #include <iostream>
 #include <thread>
 
-using namespace odrive_can_interface;
+using namespace hardware_ipc_common;
 
 static const char *action_name(ControlAction action)
 {
@@ -54,20 +54,20 @@ int main(int argc, char **argv)
 
     while (true)
     {
-        const auto *ctrl = shmitf.control();
-        if (!ctrl)
+        HshControlBlock ctrl{};
+        if (!shmitf.read_control(ctrl))
         {
             std::cerr << "Shared memory control is null\n";
             return 1;
         }
 
-        const size_t count = std::min<size_t>(ctrl->axis_count, kMaxDisplayAxes);
+        const size_t count = std::min<size_t>(ctrl.axis_count, kMaxDisplayAxes);
         std::cout << "\r";
         std::cout << "ctrl targets(rev): ";
         for (size_t i = 0; i < count; ++i)
         {
             std::cout << "A" << i << "=" << std::fixed << std::setprecision(3)
-                      << ctrl->axes[i].target << "," << action_name(ctrl->axes[i].action);
+                      << ctrl.axes[i].target << "," << action_name(ctrl.axes[i].action);
             if (i + 1 < count)
             {
                 std::cout << " | ";

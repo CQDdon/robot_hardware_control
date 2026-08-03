@@ -7,7 +7,7 @@
 #include <deque>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
-#include "odrive_can_interface/shared_memory.hpp"
+#include "hardware_ipc_common/shared_memory.hpp"
 #include "hardware_system_handler/events.hpp"
 #include "hardware_system_handler/fsm.hpp"
 
@@ -27,6 +27,9 @@ namespace hardware_system_handler
         void poll_shared_memory();
         void EventHandler();
         bool SensorActive();
+        bool refresh_state();
+        bool refresh_cmd_if();
+        bool refresh_sensor_state();
         bool StartHoming();
         float CommandErrorRate();
         bool CommandVerify();
@@ -35,7 +38,17 @@ namespace hardware_system_handler
         rclcpp::TimerBase::SharedPtr poll_timer_;
         rclcpp::TimerBase::SharedPtr watch_dog_timer_;
         rclcpp::TimerBase::SharedPtr transmit_timer_;
-        odrive_can_interface::SharedMemoryInterface shmitf_;
+        hardware_ipc_common::SharedMemoryInterface shmitf_;
+        HwiStateBlock last_state_{};
+        HwiCommandIfBlock last_cmd_if_{};
+        HwiSensorStateBlock last_sensor_state_{};
+        HshControlBlock desired_control_{};
+        bool have_state_snapshot_{false};
+        bool have_cmd_snapshot_{false};
+        bool have_sensor_snapshot_{false};
+        rclcpp::Time last_state_snapshot_time_{0, 0, RCL_ROS_TIME};
+        rclcpp::Time last_cmd_snapshot_time_{0, 0, RCL_ROS_TIME};
+        rclcpp::Time last_sensor_snapshot_time_{0, 0, RCL_ROS_TIME};
 
         rclcpp::Publisher<std_msgs::msg::String>::SharedPtr axis_error_pub_;
         rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fsm_state_pub_;
@@ -44,6 +57,7 @@ namespace hardware_system_handler
         bool error_checked_{false};
         bool did_one_shm_probe_{false};
         bool homing_required_{true};
+        bool bypass_position_homing_{false};
         bool homing_in_progress_{false};
         bool sensors_ok_sent_{false};
         bool clear_error_pending_{false};

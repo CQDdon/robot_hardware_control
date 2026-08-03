@@ -1,0 +1,7 @@
+<library path="vehicle_controller">
+  <class name="vehicle_controller/VehicleController"
+         type="vehicle_controller::VehicleController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>Safe, minimal vehicle command controller for the ODrive swerve base.</description>
+  </class>
+</library>

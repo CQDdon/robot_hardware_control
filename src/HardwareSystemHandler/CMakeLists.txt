@@ -10,7 +10,7 @@ endif()
 # =====================
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(odrive_can_interface REQUIRED)
+find_package(hardware_ipc_common REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
@@ -31,7 +31,7 @@ target_include_directories(${PROJECT_NAME}
 
 ament_target_dependencies(${PROJECT_NAME}
   rclcpp
-  odrive_can_interface
+  hardware_ipc_common
   diagnostic_msgs
   std_msgs
 )
@@ -77,7 +77,7 @@ ament_export_libraries(${PROJECT_NAME})
 ament_export_include_directories(include)
 ament_export_dependencies(
   rclcpp
-  odrive_can_interface
+  hardware_ipc_common
   diagnostic_msgs
   std_msgs
 )

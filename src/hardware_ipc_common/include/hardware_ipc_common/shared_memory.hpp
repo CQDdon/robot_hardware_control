@@ -3,9 +3,13 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <new>
 #include <string>
+#include <type_traits>
 
 // Shared memory names.
 constexpr const char *SHM_HWI_CMD_IF = "/hwi_to_hsh_cmd_if";
@@ -13,6 +17,8 @@ constexpr const char *SHM_HWI_STATE = "/hwi_to_hsh_state"; // lite state
 constexpr const char *SHM_HWI_STATE_DEBUG = "/hwi_to_hsh_state_debug";
 constexpr const char *SHM_HWI_SENSOR_STATE = "/hwi_to_hsh_sensor_state";
 constexpr const char *SHM_HSH_CTRL = "/hsh_to_hwi_ctrl";
+
+constexpr unsigned SHM_SNAPSHOT_READ_RETRIES = 3;
 
 constexpr size_t SHM_MAX_AXES = 8;
 constexpr size_t SHM_MAX_SENSORS = 8;
@@ -231,12 +237,14 @@ struct AxisCommandIf
 {
     float value;
     uint16_t reserved_u16_0;
-    uint8_t reserved_u8_0;
+    // Requested run action from the ros2_control command interfaces.  This
+    // occupies previously reserved storage, preserving this record's size.
+    ControlAction action;
     CommandInterface interface;
 
     AxisCommandIf()
         : interface(CommandInterface::None),
-          reserved_u8_0(0), reserved_u16_0(0), value(0.0f)
+          action(ControlAction::None), reserved_u16_0(0), value(0.0f)
     {
     }
 };
@@ -296,7 +304,118 @@ struct HshControlBlock
     }
 };
 
-namespace odrive_can_interface
+static_assert(std::is_trivially_copyable<HwiCommandIfBlock>::value);
+static_assert(std::is_trivially_copyable<HwiStateBlock>::value);
+static_assert(std::is_trivially_copyable<HwiStateDebugBlock>::value);
+static_assert(std::is_trivially_copyable<HwiSensorStateBlock>::value);
+static_assert(std::is_trivially_copyable<HshControlBlock>::value);
+static_assert(std::atomic<uint64_t>::is_always_lock_free,
+              "Shared-memory sequence counter must be lock-free");
+
+// Linux/POSIX shared-memory seqlock for latest-only, single-writer blocks.
+// Readers only use a copied payload after observing the same even sequence
+// number before and after the copy. Payloads must remain POD-like snapshots.
+template <typename Payload>
+struct alignas(64) ShmSnapshotBlock
+{
+    static_assert(std::is_trivially_copyable<Payload>::value,
+                  "Shared-memory payload must be trivially copyable");
+
+    std::atomic<uint64_t> sequence{0}; // odd: writer owns block, even: stable
+    uint32_t payload_size{sizeof(Payload)};
+    Payload payload{};
+};
+
+struct SnapshotStats
+{
+    std::atomic<uint64_t> read_success{0};
+    std::atomic<uint64_t> read_retry{0};
+    std::atomic<uint64_t> read_failure{0};
+    std::atomic<uint64_t> max_attempts_used{0};
+};
+
+template <typename Payload>
+inline void initialize_snapshot_block(ShmSnapshotBlock<Payload> *block)
+{
+    static_assert(std::is_trivially_copyable<Payload>::value,
+                  "Shared-memory payload must be trivially copyable");
+    new (block) ShmSnapshotBlock<Payload>();
+}
+
+template <typename Payload>
+inline bool snapshot_block_valid(const ShmSnapshotBlock<Payload> *block)
+{
+    return block != nullptr && block->payload_size == sizeof(Payload);
+}
+
+template <typename Payload>
+inline bool read_snapshot_block(const ShmSnapshotBlock<Payload> *block, Payload &out,
+                                SnapshotStats *stats = nullptr)
+{
+    if (!snapshot_block_valid(block))
+    {
+        return false;
+    }
+
+    for (unsigned attempt = 0; attempt < SHM_SNAPSHOT_READ_RETRIES; ++attempt)
+    {
+        const uint64_t begin = block->sequence.load(std::memory_order_acquire);
+        if ((begin & 1U) != 0U)
+        {
+            if (stats) stats->read_retry.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+
+        std::memcpy(&out, &block->payload, sizeof(Payload));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const uint64_t end = block->sequence.load(std::memory_order_acquire);
+        if (begin == end && (end & 1U) == 0U)
+        {
+            if (stats)
+            {
+                stats->read_success.fetch_add(1, std::memory_order_relaxed);
+                auto max = stats->max_attempts_used.load(std::memory_order_relaxed);
+                while (max < attempt + 1U &&
+                       !stats->max_attempts_used.compare_exchange_weak(max, attempt + 1U,
+                                                                         std::memory_order_relaxed)) {}
+            }
+            return true;
+        }
+        if (stats) stats->read_retry.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (stats)
+    {
+        stats->read_failure.fetch_add(1, std::memory_order_relaxed);
+        auto max = stats->max_attempts_used.load(std::memory_order_relaxed);
+        while (max < SHM_SNAPSHOT_READ_RETRIES &&
+               !stats->max_attempts_used.compare_exchange_weak(max, SHM_SNAPSHOT_READ_RETRIES,
+                                                                 std::memory_order_relaxed)) {}
+    }
+    return false;
+}
+
+template <typename Payload>
+inline bool write_snapshot_block(ShmSnapshotBlock<Payload> *block, const Payload &value)
+{
+    if (!snapshot_block_valid(block))
+    {
+        return false;
+    }
+
+    const uint64_t current = block->sequence.load(std::memory_order_relaxed);
+    if ((current & 1U) != 0U)
+    {
+        return false; // violated single-writer ownership
+    }
+    block->sequence.store(current + 1U, std::memory_order_release);
+    std::atomic_thread_fence(std::memory_order_release);
+    std::memcpy(&block->payload, &value, sizeof(Payload));
+    std::atomic_thread_fence(std::memory_order_release);
+    block->sequence.store(current + 2U, std::memory_order_release);
+    return true;
+}
+
+namespace hardware_ipc_common
 {
 
     class SharedMemorySegment
@@ -353,25 +472,22 @@ namespace odrive_can_interface
         void close();
         bool ready() const noexcept;
 
-        HwiCommandIfBlock *cmd_if() noexcept;
-        HwiStateBlock *state() noexcept;
-        HwiStateDebugBlock *state_debug() noexcept;
-        HwiSensorStateBlock *sensor_state() noexcept;
-        HshControlBlock *control() noexcept;
-        const HwiCommandIfBlock *cmd_if() const noexcept;
-        const HwiStateBlock *state() const noexcept;
-        const HwiStateDebugBlock *state_debug() const noexcept;
-        const HwiSensorStateBlock *sensor_state() const noexcept;
-        const HshControlBlock *control() const noexcept;
+        bool read_cmd_if(HwiCommandIfBlock &command_if) const;
+        bool read_state(HwiStateBlock &state) const;
+        bool read_state_debug(HwiStateDebugBlock &state) const;
+        bool read_sensor_state(HwiSensorStateBlock &state) const;
+        bool read_control(HshControlBlock &control) const;
+        const SnapshotStats &snapshot_stats() const noexcept { return snapshot_stats_; }
 
     private:
-        SharedMemorySegment cmd_if_segment_{SHM_HWI_CMD_IF, sizeof(HwiCommandIfBlock)};
-        SharedMemorySegment state_segment_{SHM_HWI_STATE, sizeof(HwiStateBlock)};
-        SharedMemorySegment state_debug_segment_{SHM_HWI_STATE_DEBUG, sizeof(HwiStateDebugBlock)};
-        SharedMemorySegment sensor_state_segment_{SHM_HWI_SENSOR_STATE, sizeof(HwiSensorStateBlock)};
-        SharedMemorySegment control_segment_{SHM_HSH_CTRL, sizeof(HshControlBlock)};
+        SharedMemorySegment cmd_if_segment_{SHM_HWI_CMD_IF, sizeof(ShmSnapshotBlock<HwiCommandIfBlock>)};
+        SharedMemorySegment state_segment_{SHM_HWI_STATE, sizeof(ShmSnapshotBlock<HwiStateBlock>)};
+        SharedMemorySegment state_debug_segment_{SHM_HWI_STATE_DEBUG, sizeof(ShmSnapshotBlock<HwiStateDebugBlock>)};
+        SharedMemorySegment sensor_state_segment_{SHM_HWI_SENSOR_STATE, sizeof(ShmSnapshotBlock<HwiSensorStateBlock>)};
+        SharedMemorySegment control_segment_{SHM_HSH_CTRL, sizeof(ShmSnapshotBlock<HshControlBlock>)};
+        mutable SnapshotStats snapshot_stats_{};
     };
 
-} // namespace odrive_can_interface
+} // namespace hardware_ipc_common
 
 #endif // SHM_HPP

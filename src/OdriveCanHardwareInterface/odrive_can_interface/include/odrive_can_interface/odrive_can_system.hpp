@@ -21,7 +21,7 @@
 
 #include "odrive_can_interface/odrive_motor.hpp"
 #include "odrive_can_interface/can_comm.hpp"
-#include "odrive_can_interface/shared_memory.hpp"
+#include "hardware_ipc_common/shared_memory.hpp"
 
 namespace odrive_can_interface
 {
@@ -78,14 +78,30 @@ namespace odrive_can_interface
         // Buffers ROS 2 Control
         std::vector<double> position_;
         std::vector<double> velocity_;
+        // System-level state exported for safety controllers. Values are 0.0/1.0.
+        double hardware_online_{0.0};
+        double hardware_fault_{1.0};
+        double motion_allowed_{0.0};
+        // Firmware digital output mask, Q0 at bit 0. Exported as a ros2_control command/state pair.
+        double io_output_mask_command_{0.0};
+        double io_output_mask_state_{0.0};
+        // MCU acknowledgement received on CAN ID 0x101.  This is separate
+        // from the requested mask so the transmitter can retry until the
+        // remote side confirms the requested output state.
+        std::atomic<uint8_t> io_output_mask_pending_{0};
+        std::atomic<uint8_t> io_output_mask_feedback_{0};
+        std::atomic<bool> io_output_feedback_received_{false};
 
         std::vector<OdriveMotor::ControlMode> joint_mode_;
         std::vector<double> command_pos_;
         std::vector<double> command_vel_;
+        // A position axis can be explicitly idled (for a spring-return brake).
+        // 0.0 requests closed loop, values >= 0.5 request IDLE.
+        std::vector<double> command_idle_;
         std::vector<ControlAction> last_axis_action_;
 
     // Shared memory 
-        SharedMemoryInterface shmitf_;
+        hardware_ipc_common::SharedMemoryInterface shmitf_;
     // Threads
         std::thread can_receive_thread_;
         std::thread watch_dog_thread_;
@@ -107,6 +123,10 @@ namespace odrive_can_interface
         static constexpr std::chrono::microseconds TX_FRE{5000}; // 200 Hz
         static constexpr std::chrono::microseconds RX_FRE{5000}; // 200 Hz
         static constexpr std::chrono::microseconds WATCH_DOG_FRE{100000}; // 10 Hz  
+        static constexpr std::chrono::milliseconds IO_RETRY_PERIOD{100};
+        // Diagnostic-only timeout for the MCU's 0x101 output acknowledgement.
+        // It must never affect HSH motion permission or ODrive control.
+        static constexpr std::chrono::milliseconds IO_ACK_TIMEOUT{500};
 
     };  
 

@@ -1,0 +1,16 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 200
+    vehicle_controller:
+      type: vehicle_controller/VehicleController
+
+vehicle_controller:
+  ros__parameters:
+    brake_joints: [RearRightDriver_Joint]
+    wheel_joints: [RearRightWheel_Joint]
+    # Temporary test setting requested: +0.5 turn from captured position.
+    spring_brake_travel_rad: 3.14159265359
+    max_wheel_velocity_rad_s: 20.0
+    command_timeout_ms: 250
+    # Bench test: motion_cmd alone drives the axes.  Production should set true.
+    require_function_command: false

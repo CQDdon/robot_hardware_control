@@ -8,13 +8,13 @@ find_package(pluginlib REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
+find_package(hardware_ipc_common REQUIRED)
 
 # ===== Library sources =====
 set(ODRIVE_HW_SRCS
   src/can_comm.cpp
   src/odrive_motor.cpp
   src/odrive_can_system.cpp
-  src/shared_memory.cpp
 )
 
 # ===== Tạo thư viện =====
@@ -33,6 +33,7 @@ ament_target_dependencies(${PROJECT_NAME}
   pluginlib
   hardware_interface
   diagnostic_msgs
+  hardware_ipc_common
   )
 
 # Visibility (nếu cần)
@@ -82,6 +83,6 @@ install(TARGETS odrive_homing odrive_calib
 # Export target & include dirs cho package khác dùng
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_include_directories(include)
-ament_export_dependencies(rclcpp rclcpp_lifecycle pluginlib hardware_interface)
+ament_export_dependencies(rclcpp rclcpp_lifecycle pluginlib hardware_interface hardware_ipc_common)
 
 ament_package()

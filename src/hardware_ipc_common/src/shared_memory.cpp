@@ -1,4 +1,4 @@
-#include "odrive_can_interface/shared_memory.hpp"
+#include "hardware_ipc_common/shared_memory.hpp"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -9,7 +9,7 @@
 #include <utility>
 #include <cstdio>
 
-namespace odrive_can_interface
+namespace hardware_ipc_common
 {
 
 SharedMemorySegment::SharedMemorySegment(std::string name, std::size_t size)
@@ -150,26 +150,20 @@ bool SharedMemoryInterface::open(bool clear_on_open)
 
 	if (clear_on_open)
 	{
-		if (auto *cmd = cmd_if())
-		{
-			std::memset(cmd, 0, sizeof(HwiCommandIfBlock));
-		}
-		if (auto *st = state())
-		{
-			std::memset(st, 0, sizeof(HwiStateBlock));
-		}
-		if (auto *st_dbg = state_debug())
-		{
-			std::memset(st_dbg, 0, sizeof(HwiStateDebugBlock));
-		}
-		if (auto *sensor_st = sensor_state())
-		{
-			std::memset(sensor_st, 0, sizeof(HwiSensorStateBlock));
-		}
-		if (auto *ctrl = control())
-		{
-			std::memset(ctrl, 0, sizeof(HshControlBlock));
-		}
+		initialize_snapshot_block(cmd_if_segment_.as<ShmSnapshotBlock<HwiCommandIfBlock>>());
+		initialize_snapshot_block(state_segment_.as<ShmSnapshotBlock<HwiStateBlock>>());
+		initialize_snapshot_block(state_debug_segment_.as<ShmSnapshotBlock<HwiStateDebugBlock>>());
+		initialize_snapshot_block(sensor_state_segment_.as<ShmSnapshotBlock<HwiSensorStateBlock>>());
+		initialize_snapshot_block(control_segment_.as<ShmSnapshotBlock<HshControlBlock>>());
+	}
+	else if (!snapshot_block_valid(cmd_if_segment_.as<ShmSnapshotBlock<HwiCommandIfBlock>>()) ||
+	         !snapshot_block_valid(state_segment_.as<ShmSnapshotBlock<HwiStateBlock>>()) ||
+	         !snapshot_block_valid(state_debug_segment_.as<ShmSnapshotBlock<HwiStateDebugBlock>>()) ||
+	         !snapshot_block_valid(sensor_state_segment_.as<ShmSnapshotBlock<HwiSensorStateBlock>>()) ||
+	         !snapshot_block_valid(control_segment_.as<ShmSnapshotBlock<HshControlBlock>>()))
+	{
+		close();
+		return false;
 	}
 	return true;
 }
@@ -181,20 +175,7 @@ bool SharedMemoryInterface::write_state(const HwiStateBlock &state_data)
 		return false;
 	}
 
-	HwiStateBlock *st = state();
-	if (!st)
-	{
-		return false;
-	}
-
-	std::memcpy(st, &state_data, sizeof(HwiStateBlock));
-	if (msync(st, sizeof(HwiStateBlock), MS_SYNC) != 0)
-	{
-		std::fprintf(stderr, "ERROR: failed to msync state segment, errno=%s\n", std::strerror(errno));
-		return false;
-	}
-
-	return true;
+	return write_snapshot_block(state_segment_.as<ShmSnapshotBlock<HwiStateBlock>>(), state_data);
 }
 
 bool SharedMemoryInterface::write_state_debug(const HwiStateDebugBlock &state_data)
@@ -204,20 +185,7 @@ bool SharedMemoryInterface::write_state_debug(const HwiStateDebugBlock &state_da
 		return false;
 	}
 
-	HwiStateDebugBlock *st = state_debug();
-	if (!st)
-	{
-		return false;
-	}
-
-	std::memcpy(st, &state_data, sizeof(HwiStateDebugBlock));
-	if (msync(st, sizeof(HwiStateDebugBlock), MS_SYNC) != 0)
-	{
-		std::fprintf(stderr, "ERROR: failed to msync state_debug segment, errno=%s\n", std::strerror(errno));
-		return false;
-	}
-
-	return true;
+	return write_snapshot_block(state_debug_segment_.as<ShmSnapshotBlock<HwiStateDebugBlock>>(), state_data);
 }
 
 bool SharedMemoryInterface::write_sensor_state(const HwiSensorStateBlock &state_data)
@@ -227,20 +195,7 @@ bool SharedMemoryInterface::write_sensor_state(const HwiSensorStateBlock &state_
 		return false;
 	}
 
-	HwiSensorStateBlock *st = sensor_state();
-	if (!st)
-	{
-		return false;
-	}
-
-	std::memcpy(st, &state_data, sizeof(HwiSensorStateBlock));
-	if (msync(st, sizeof(HwiSensorStateBlock), MS_SYNC) != 0)
-	{
-		std::fprintf(stderr, "ERROR: failed to msync sensor_state segment, errno=%s\n", std::strerror(errno));
-		return false;
-	}
-
-	return true;
+	return write_snapshot_block(sensor_state_segment_.as<ShmSnapshotBlock<HwiSensorStateBlock>>(), state_data);
 }
 
 bool SharedMemoryInterface::write_cmd_if(const HwiCommandIfBlock &command_if_data)
@@ -250,20 +205,7 @@ bool SharedMemoryInterface::write_cmd_if(const HwiCommandIfBlock &command_if_dat
 		return false;
 	}
 
-	HwiCommandIfBlock *cmd = cmd_if();
-	if (!cmd)
-	{
-		return false;
-	}
-
-	std::memcpy(cmd, &command_if_data, sizeof(HwiCommandIfBlock));
-	if (msync(cmd, sizeof(HwiCommandIfBlock), MS_SYNC) != 0)
-	{
-		std::fprintf(stderr, "ERROR: failed to msync cmd_if segment, errno=%s\n", std::strerror(errno));
-		return false;
-	}
-
-	return true;
+	return write_snapshot_block(cmd_if_segment_.as<ShmSnapshotBlock<HwiCommandIfBlock>>(), command_if_data);
 }
 
 bool SharedMemoryInterface::write_control(const HshControlBlock &control_data)
@@ -273,20 +215,7 @@ bool SharedMemoryInterface::write_control(const HshControlBlock &control_data)
 		return false;
 	}
 
-	HshControlBlock *ctrl = control();
-	if (!ctrl)
-	{
-		return false;
-	}
-
-	std::memcpy(ctrl, &control_data, sizeof(HshControlBlock));
-	if (msync(ctrl, sizeof(HshControlBlock), MS_SYNC) != 0)
-	{
-		std::fprintf(stderr, "ERROR: failed to msync control segment, errno=%s\n", std::strerror(errno));
-		return false;
-	}
-
-	return true;
+	return write_snapshot_block(control_segment_.as<ShmSnapshotBlock<HshControlBlock>>(), control_data);
 }
 
 void SharedMemoryInterface::close()
@@ -305,54 +234,29 @@ bool SharedMemoryInterface::ready() const noexcept
 	       control_segment_.is_open();
 }
 
-HwiCommandIfBlock *SharedMemoryInterface::cmd_if() noexcept
+bool SharedMemoryInterface::read_cmd_if(HwiCommandIfBlock &command_if) const
 {
-	return cmd_if_segment_.as<HwiCommandIfBlock>();
+	return ready() && read_snapshot_block(cmd_if_segment_.as<const ShmSnapshotBlock<HwiCommandIfBlock>>(), command_if, &snapshot_stats_);
 }
 
-const HwiCommandIfBlock *SharedMemoryInterface::cmd_if() const noexcept
+bool SharedMemoryInterface::read_state(HwiStateBlock &state_data) const
 {
-	return cmd_if_segment_.as<const HwiCommandIfBlock>();
+	return ready() && read_snapshot_block(state_segment_.as<const ShmSnapshotBlock<HwiStateBlock>>(), state_data, &snapshot_stats_);
 }
 
-HwiStateBlock *SharedMemoryInterface::state() noexcept
+bool SharedMemoryInterface::read_state_debug(HwiStateDebugBlock &state_data) const
 {
-	return state_segment_.as<HwiStateBlock>();
+	return ready() && read_snapshot_block(state_debug_segment_.as<const ShmSnapshotBlock<HwiStateDebugBlock>>(), state_data, &snapshot_stats_);
 }
 
-const HwiStateBlock *SharedMemoryInterface::state() const noexcept
+bool SharedMemoryInterface::read_sensor_state(HwiSensorStateBlock &state_data) const
 {
-	return state_segment_.as<const HwiStateBlock>();
+	return ready() && read_snapshot_block(sensor_state_segment_.as<const ShmSnapshotBlock<HwiSensorStateBlock>>(), state_data, &snapshot_stats_);
 }
 
-HwiStateDebugBlock *SharedMemoryInterface::state_debug() noexcept
+bool SharedMemoryInterface::read_control(HshControlBlock &control_data) const
 {
-	return state_debug_segment_.as<HwiStateDebugBlock>();
+	return ready() && read_snapshot_block(control_segment_.as<const ShmSnapshotBlock<HshControlBlock>>(), control_data, &snapshot_stats_);
 }
 
-const HwiStateDebugBlock *SharedMemoryInterface::state_debug() const noexcept
-{
-	return state_debug_segment_.as<const HwiStateDebugBlock>();
-}
-
-HwiSensorStateBlock *SharedMemoryInterface::sensor_state() noexcept
-{
-	return sensor_state_segment_.as<HwiSensorStateBlock>();
-}
-
-const HwiSensorStateBlock *SharedMemoryInterface::sensor_state() const noexcept
-{
-	return sensor_state_segment_.as<const HwiSensorStateBlock>();
-}
-
-HshControlBlock *SharedMemoryInterface::control() noexcept
-{
-	return control_segment_.as<HshControlBlock>();
-}
-
-const HshControlBlock *SharedMemoryInterface::control() const noexcept
-{
-	return control_segment_.as<const HshControlBlock>();
-}
-
-} // namespace odrive_can_interface
+} // namespace hardware_ipc_common
