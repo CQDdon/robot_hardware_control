@@ -52,20 +52,18 @@ private:
   void motion_callback(const vehicle_msgs::msg::VehicleMotionCommand::SharedPtr msg);
   void function_callback(const vehicle_msgs::msg::VehicleFunctionCommand::SharedPtr msg);
   void write_safe_command();
-  void set_brake_command(double brake_percentage, bool force_engaged);
+  void set_position_command(double position_percentage, bool force_engaged,
+                            bool clear_reference_on_release);
   bool is_timed_out(int64_t received_ns, const rclcpp::Time & time) const;
   void publish_states(const rclcpp::Time & time, const MotionInput & motion,
                       const FunctionInput & function, bool timed_out, bool safe);
 
   std::vector<std::string> brake_joints_;
   std::vector<std::string> wheel_joints_;
-  double spring_brake_travel_rad_{3.14159265359};
+  double position_max_offset_turns_{30.0};
   double max_wheel_velocity_rad_s_{20.0};
   int command_timeout_ms_{250};
   bool require_function_command_{true};
-  std::vector<double> brake_reference_position_;
-  bool brake_target_valid_{false};
-  double latched_brake_percentage_{-1.0};
 
   realtime_tools::RealtimeBuffer<MotionInput> motion_buffer_;
   realtime_tools::RealtimeBuffer<FunctionInput> function_buffer_;
@@ -77,3 +75,5 @@ private:
   std::shared_ptr<realtime_tools::RealtimePublisher<vehicle_msgs::msg::VehicleSystemState>> system_rt_pub_;
 };
 }  // namespace vehicle_controller
+  std::vector<double> position_reference_rad_;
+  bool position_reference_valid_{false};

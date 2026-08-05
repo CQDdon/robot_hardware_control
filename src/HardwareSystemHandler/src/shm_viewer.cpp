@@ -42,6 +42,18 @@ const char* get_state_color(AxisStateSummary state)
     }
 }
 
+const char* desired_state_to_string(AxisDesiredState state)
+{
+    switch (state)
+    {
+        case AxisDesiredState::Idle:            return "Idle";
+        case AxisDesiredState::ClosedLoop:      return "ClosedLoop";
+        case AxisDesiredState::FullCalibration: return "FullCalibration";
+        case AxisDesiredState::Homing:          return "Homing";
+        default:                                return "Invalid";
+    }
+}
+
 int main(int, char**)
 {
     // Open shared memory
@@ -90,9 +102,9 @@ int main(int, char**)
     std::cout << std::endl;
 
     // Axis table header
-    std::cout << BOLD << YELLOW << "┌──────┬────────┬────────┬──────────────┬───────────┬──────────┬──────────┬──────────┐" << RESET << std::endl;
-    std::cout << BOLD << YELLOW << "│ Axis │ CAN ID │ Online │    State     │   Error   │ Position │ Velocity │  Action  │" << RESET << std::endl;
-    std::cout << BOLD << YELLOW << "├──────┼────────┼────────┼──────────────┼───────────┼──────────┼──────────┼──────────┤" << RESET << std::endl;
+    std::cout << BOLD << YELLOW << "┌──────┬────────┬────────┬──────────────┬──────────────┬────────┬──────────┬──────────┬──────────────┐" << RESET << std::endl;
+    std::cout << BOLD << YELLOW << "│ Axis │ CAN ID │ Online │ Actual state │ Desired state│ Motion │ Position │ Velocity │ gen/target/err│" << RESET << std::endl;
+    std::cout << BOLD << YELLOW << "├──────┼────────┼────────┼──────────────┼──────────────┼────────┼──────────┼──────────┼──────────────┤" << RESET << std::endl;
 
     // Axis data
     for (size_t i = 0; i < state->axis_count && i < SHM_MAX_AXES; ++i)
@@ -107,26 +119,24 @@ int main(int, char**)
         // State with color
         const char* state_color = get_state_color(axis.odrive_state_summary);
 
-        // Error status
-        bool has_error = (axis.error != 0);
-        const char* error_color = has_error ? RED : GREEN;
-        const char* error_str = has_error ? " ERROR " : "  OK   ";
-
         std::cout << "│ " << std::setw(4) << i << " ";
         std::cout << "│ " << std::setw(6) << axis.can_id << " ";
         std::cout << "│ " << online_color << online_str << RESET << " ";
         std::cout << "│ " << state_color << std::setw(12) << std::left 
                   << axis_state_to_string(axis.odrive_state_summary) << RESET << " ";
-        std::cout << "│ " << error_color << error_str << RESET << " ";
+        std::cout << "│ " << std::setw(12) << std::left
+                  << desired_state_to_string(ctrl_axis.desired_axis_state) << " ";
+        std::cout << "│ " << online_color << (ctrl_axis.motion_enable ? "on" : "off") << RESET << "    ";
         std::cout << "│ " << std::setw(8) << std::right << std::fixed << std::setprecision(2) 
                   << axis.position << " ";
         std::cout << "│ " << std::setw(8) << std::right << std::fixed << std::setprecision(2) 
                   << axis.velocity << " ";
-        std::cout << "│ " << std::setw(8) << static_cast<int>(ctrl_axis.action) << " ";
+        std::cout << "│ " << ctrl_axis.desired_state_generation << "/"
+                  << ctrl_axis.target_sequence << "/" << ctrl_axis.clear_error_req_id << " ";
         std::cout << "│" << std::endl;
     }
 
-    std::cout << BOLD << YELLOW << "└──────┴────────┴────────┴──────────────┴───────────┴──────────┴──────────┴──────────┘" << RESET << std::endl;
+    std::cout << BOLD << YELLOW << "└──────┴────────┴────────┴──────────────┴──────────────┴────────┴──────────┴──────────┴──────────────┘" << RESET << std::endl;
     std::cout << std::endl;
 
     // Error details

@@ -29,6 +29,23 @@ static const char *action_name(ControlAction action)
     }
 }
 
+static const char *desired_state_name(AxisDesiredState state)
+{
+    switch (state)
+    {
+    case AxisDesiredState::Idle:
+        return "Idle";
+    case AxisDesiredState::ClosedLoop:
+        return "ClosedLoop";
+    case AxisDesiredState::FullCalibration:
+        return "FullCalibration";
+    case AxisDesiredState::Homing:
+        return "Homing";
+    default:
+        return "Unknown";
+    }
+}
+
 int main(int argc, char **argv)
 {
     unsigned long period_ms = 100;
@@ -63,11 +80,17 @@ int main(int argc, char **argv)
 
         const size_t count = std::min<size_t>(ctrl.axis_count, kMaxDisplayAxes);
         std::cout << "\r";
-        std::cout << "ctrl targets(rev): ";
+        std::cout << "ctrl targets(rev), desired/actual protocol: ";
         for (size_t i = 0; i < count; ++i)
         {
             std::cout << "A" << i << "=" << std::fixed << std::setprecision(3)
-                      << ctrl.axes[i].target << "," << action_name(ctrl.axes[i].action);
+                      << ctrl.axes[i].target
+                      << ",desired=" << desired_state_name(ctrl.axes[i].desired_axis_state)
+                      << ",motion=" << static_cast<int>(ctrl.axes[i].motion_enable)
+                      << ",gen=" << ctrl.axes[i].desired_state_generation
+                      << ",target_seq=" << ctrl.axes[i].target_sequence
+                      << ",clear_req=" << ctrl.axes[i].clear_error_req_id
+                      << ",legacy=" << action_name(ctrl.axes[i].action);
             if (i + 1 < count)
             {
                 std::cout << " | ";

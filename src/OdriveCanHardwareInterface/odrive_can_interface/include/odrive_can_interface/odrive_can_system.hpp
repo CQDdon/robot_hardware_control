@@ -98,7 +98,10 @@ namespace odrive_can_interface
         // A position axis can be explicitly idled (for a spring-return brake).
         // 0.0 requests closed loop, values >= 0.5 request IDLE.
         std::vector<double> command_idle_;
-        std::vector<ControlAction> last_axis_action_;
+        std::vector<uint64_t> last_desired_state_generation_;
+        std::vector<uint64_t> last_clear_error_req_id_;
+        std::vector<bool> procedural_state_started_;
+        std::vector<std::chrono::steady_clock::time_point> last_axis_state_send_time_;
 
     // Shared memory 
         hardware_ipc_common::SharedMemoryInterface shmitf_;
@@ -123,6 +126,7 @@ namespace odrive_can_interface
         static constexpr std::chrono::microseconds TX_FRE{5000}; // 200 Hz
         static constexpr std::chrono::microseconds RX_FRE{5000}; // 200 Hz
         static constexpr std::chrono::microseconds WATCH_DOG_FRE{100000}; // 10 Hz  
+        static constexpr std::chrono::milliseconds AXIS_STATE_RETRY_PERIOD{100};
         static constexpr std::chrono::milliseconds IO_RETRY_PERIOD{100};
         // Diagnostic-only timeout for the MCU's 0x101 output acknowledgement.
         // It must never affect HSH motion permission or ODrive control.

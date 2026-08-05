@@ -43,6 +43,16 @@ enum class ControlAction : uint8_t
     ClearErrors = 5
 };
 
+// Desired ODrive axis state. This is distinct from heartbeat feedback and
+// from the deprecated ControlAction compatibility field.
+enum class AxisDesiredState : uint8_t
+{
+    Idle = 1,
+    FullCalibration = 3,
+    ClosedLoop = 8,
+    Homing = 11
+};
+
 enum class SafetyAction : uint8_t
 {
     None = 0,
@@ -274,11 +284,20 @@ struct AxisControl
     float target;
     uint16_t reserved_u16_0;
     uint8_t reserved_u8_0;
+    // Compatibility-only during H4/H5. CAN must not use this as control input.
     ControlAction action;
+    AxisDesiredState desired_axis_state;
+    uint8_t motion_enable;
+    CommandInterface control_mode;
+    uint64_t desired_state_generation;
+    uint64_t target_sequence;
+    uint64_t clear_error_req_id;
 
     AxisControl()
-        : action(ControlAction::None), reserved_u8_0(0),
-          reserved_u16_0(0), target(0.0f)
+        : action(ControlAction::None), desired_axis_state(AxisDesiredState::Idle),
+          motion_enable(0), control_mode(CommandInterface::None),
+          desired_state_generation(0), target_sequence(0), clear_error_req_id(0),
+          reserved_u8_0(0), reserved_u16_0(0), target(0.0f)
     {
     }
 };

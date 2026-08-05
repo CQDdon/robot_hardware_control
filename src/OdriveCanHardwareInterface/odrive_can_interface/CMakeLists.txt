@@ -20,6 +20,12 @@ set(ODRIVE_HW_SRCS
 # ===== Tạo thư viện =====
 add_library(${PROJECT_NAME} SHARED ${ODRIVE_HW_SRCS})
 
+# ros2_control loads this library with dlopen.  At that point colcon's
+# LD_LIBRARY_PATH may not include a transitive dependency package, so retain
+# a relocatable path to the sibling IPC package in the install tree.
+set_target_properties(${PROJECT_NAME} PROPERTIES
+  INSTALL_RPATH "$ORIGIN/../../hardware_ipc_common/lib")
+
 # Include dirs chuẩn ament (BUILD + INSTALL)
 target_include_directories(${PROJECT_NAME}
   PUBLIC

@@ -15,23 +15,15 @@ class VehicleKeyboardTeleop(Node):
     def __init__(self):
         super().__init__('vehicle_keyboard_teleop')
         self.declare_parameter('publish_rate_hz', 20.0)
-        self.declare_parameter('steering_step_rad', 0.10)
         self.declare_parameter('throttle_step_percentage', 5.0)
-        self.declare_parameter('brake_step_percentage', 10.0)
-        self.declare_parameter('max_steering_angle_rad', 1.57079632679)
         self.declare_parameter('max_throttle_percentage', 100.0)
-        self.declare_parameter('max_brake_percentage', 100.0)
 
         self.publish_rate_hz = float(self.get_parameter('publish_rate_hz').value)
-        self.steering_step = float(self.get_parameter('steering_step_rad').value)
         self.throttle_step = float(self.get_parameter('throttle_step_percentage').value)
-        self.brake_step = float(self.get_parameter('brake_step_percentage').value)
-        self.max_steering = float(self.get_parameter('max_steering_angle_rad').value)
         self.max_throttle = float(self.get_parameter('max_throttle_percentage').value)
-        self.max_brake = float(self.get_parameter('max_brake_percentage').value)
-        if self.publish_rate_hz <= 0.0 or min(self.steering_step, self.throttle_step, self.brake_step) <= 0.0:
+        if self.publish_rate_hz <= 0.0 or self.throttle_step <= 0.0:
             raise ValueError('publish_rate_hz and all step sizes must be positive')
-        if min(self.max_steering, self.max_throttle, self.max_brake) < 0.0:
+        if self.max_throttle < 0.0:
             raise ValueError('all limits must be non-negative')
 
         self.motion_pub = self.create_publisher(VehicleMotionCommand, '/vehicle/control/motion_cmd', 10)
@@ -44,11 +36,10 @@ class VehicleKeyboardTeleop(Node):
         self.timer = self.create_timer(1.0 / self.publish_rate_hz, self._timer_callback)
 
     def _set_safe_state(self):
-        self.steering = 0.0
         self.throttle = 0.0
-        # The brake axis is released by default (IDLE).  It is a separate
-        # actuator and must not follow the wheel command state.
-        self.brake = 0.0
+        # Position axis is released (IDLE) by default. Space selects one of
+        # three relative offsets: current +10, +20, or +30 turns.
+        self.position_level = 0
         self.gear = VehicleMotionCommand.GEAR_NEUTRAL
         self.motion_enable = False
         self.emergency_stop = False
@@ -68,7 +59,7 @@ class VehicleKeyboardTeleop(Node):
 
     def _print_help(self):
         print('\nVehicle keyboard teleop (publish 20 Hz mặc định)')
-        print('W/S tốc độ bánh +/- | A/D steer trái/phải | Space tăng phanh | Z nhả phanh')
+        print('W/S tốc độ axis 5 +/- | Space: axis 4 +10/+20/+30 turns | Z nhả axis 4')
         print('R tiến | F lùi | N neutral | E bật/tắt motion | X E-stop | Q thoát an toàn')
         print('1..8: bật/tắt Q0..Q7; 0: tắt toàn bộ Q0..Q7. Output bị ép 0 khi ở safe state.\n')
 
@@ -88,14 +79,10 @@ class VehicleKeyboardTeleop(Node):
             self.throttle = self._clamp(self.throttle + self.throttle_step, 0.0, self.max_throttle)
         elif key == 's':
             self.throttle = self._clamp(self.throttle - self.throttle_step, 0.0, self.max_throttle)
-        elif key == 'a':
-            self.steering = self._clamp(self.steering + self.steering_step, -self.max_steering, self.max_steering)
-        elif key == 'd':
-            self.steering = self._clamp(self.steering - self.steering_step, -self.max_steering, self.max_steering)
         elif key == ' ':
-            self.brake = self._clamp(self.brake + self.brake_step, 0.0, self.max_brake)
+            self.position_level = min(self.position_level + 1, 3)
         elif key == 'z':
-            self.brake = 0.0
+            self.position_level = 0
         elif key == 'r':
             self.gear = VehicleMotionCommand.GEAR_DRIVE
         elif key == 'f':
@@ -122,9 +109,9 @@ class VehicleKeyboardTeleop(Node):
 
     def publish_commands(self):
         motion = VehicleMotionCommand()
-        motion.steering_angle_rad = float(self.steering)
+        motion.steering_angle_rad = 0.0
         motion.speed_percentage = float(self.throttle)
-        motion.brake_percentage = float(self.brake)
+        motion.brake_percentage = 100.0 * self.position_level / 3.0
         motion.gear = self.gear
         function = VehicleFunctionCommand()
         function.motion_enable = self.motion_enable
@@ -136,8 +123,8 @@ class VehicleKeyboardTeleop(Node):
     def _display_state(self):
         gear = {VehicleMotionCommand.GEAR_NEUTRAL: 'N', VehicleMotionCommand.GEAR_DRIVE: 'D',
                 VehicleMotionCommand.GEAR_REVERSE: 'R'}[self.gear]
-        text = (f'\r steer={self.steering:+.2f} rad | throttle={self.throttle:5.1f}% | '
-                f'brake={self.brake:5.1f}% | gear={gear} | motion={"ON " if self.motion_enable else "OFF"} | '
+        text = (f'\r velocity={self.throttle:5.1f}% | '
+                f'axis4_offset=+{10 * self.position_level} turns | gear={gear} | motion={"ON " if self.motion_enable else "OFF"} | '
                 f'estop={"ON " if self.emergency_stop else "OFF"} | Q=[{self.io_output_mask:02X}]   ')
         sys.stdout.write(text)
         sys.stdout.flush()

@@ -136,6 +136,28 @@ namespace hardware_system_handler
         return have_sensor_snapshot_ && get_clock()->now() - last_sensor_snapshot_time_ <= kSensorStaleTimeout;
     }
 
+    void HshNode::request_axis_state(size_t axis, AxisDesiredState state)
+    {
+        if (axis >= SHM_MAX_AXES) return;
+        auto &control = desired_control_.axes[axis];
+        if (control.desired_axis_state != state)
+        {
+            control.desired_axis_state = state;
+            ++control.desired_state_generation;
+        }
+        control.action = state == AxisDesiredState::Idle ? ControlAction::Idle :
+                         state == AxisDesiredState::ClosedLoop ? ControlAction::ClosedLoop :
+                         state == AxisDesiredState::Homing ? ControlAction::Homing :
+                         ControlAction::FullCalib;
+    }
+
+    void HshNode::request_clear_errors(size_t axis)
+    {
+        if (axis >= SHM_MAX_AXES || clear_error_requested_[axis]) return;
+        ++desired_control_.axes[axis].clear_error_req_id;
+        clear_error_requested_[axis] = true;
+    }
+
     HshNode::HshNode() : rclcpp::Node("hsh_node")
     {
         bypass_position_homing_ = this->declare_parameter<bool>("bypass_position_homing", false);
@@ -311,7 +333,9 @@ namespace hardware_system_handler
         ctrl->axis_count = static_cast<uint8_t>(count);
         for (size_t i = count; i < SHM_MAX_AXES; ++i)
         {
-            ctrl->axes[i].action = ControlAction::Idle;
+            request_axis_state(i, AxisDesiredState::Idle);
+            ctrl->axes[i].motion_enable = false;
+            ctrl->axes[i].target = 0.0f;
         }
         bool sent = false;
         for (size_t i = 0; i < count; ++i)
@@ -320,7 +344,9 @@ namespace hardware_system_handler
                 continue;
             if (homing_command_sent_[i] || homing_done_[i])
                 continue;
-            ctrl->axes[i].action = ControlAction::Homing;
+            request_axis_state(i, AxisDesiredState::Homing);
+            ctrl->axes[i].motion_enable = false;
+            ctrl->axes[i].target = 0.0f;
             homing_command_sent_[i] = true;
             homing_command_time_ns_[i] = now.nanoseconds();
             sent = true;
@@ -408,10 +434,11 @@ namespace hardware_system_handler
             desired_control_.motion_enable = false;
             desired_control_.timestamp_ns = static_cast<uint64_t>(get_clock()->now().nanoseconds());
             desired_control_.sequence_id += 1;
-            for (auto &axis : desired_control_.axes)
+            for (size_t i = 0; i < SHM_MAX_AXES; ++i)
             {
-                axis.action = ControlAction::Idle;
-                axis.target = 0.0f;
+                request_axis_state(i, AxisDesiredState::Idle);
+                desired_control_.axes[i].motion_enable = false;
+                desired_control_.axes[i].target = 0.0f;
             }
             return;
         }
@@ -450,12 +477,14 @@ namespace hardware_system_handler
                 fault_enter_time_ = now;
                 clear_error_time_ = now;
                 clear_error_pending_ = true;
+                clear_error_requested_.fill(false);
             }
             if (current_state == FsmState::Ready)
             {
                 clear_error_pending_ = false;
                 debug_mode_ = false;
                 error_events_.clear();
+                clear_error_requested_.fill(false);
             }
             if (current_state == FsmState::Offline)
             {
@@ -571,6 +600,7 @@ namespace hardware_system_handler
                 const int64_t elapsed_ns = now.nanoseconds() - homing_command_time_ns_[i];
                 const bool idle_after_delay =
                     homing_command_sent_[i] &&
+                    homing_started_[i] &&
                     homing_command_time_ns_[i] > 0 &&
                     elapsed_ns > kHomingDoneDelayNs &&
                     axis.odrive_state_summary == AxisStateSummary::Idle;
@@ -692,7 +722,10 @@ namespace hardware_system_handler
             {
                 if (state->axes[i].error != 0)
                 {
-                    ctrl->axes[i].action = ControlAction::ClearErrors;
+                    request_axis_state(i, AxisDesiredState::Idle);
+                    ctrl->axes[i].motion_enable = false;
+                    ctrl->axes[i].target = 0.0f;
+                    request_clear_errors(i);
                 }
             }
 
@@ -760,6 +793,17 @@ namespace hardware_system_handler
         if (current_state == FsmState::WaitHoming && homing_required_ &&
             homing_done && !any_homing && !any_offline)
         {
+            for (size_t i = 0; i < count; ++i)
+            {
+                if (cmd_if->axes[i].interface == CommandInterface::Position)
+                {
+                    // Complete the procedural generation before permitting a
+                    // later, distinct homing generation.
+                    request_axis_state(i, AxisDesiredState::Idle);
+                    ctrl->axes[i].motion_enable = false;
+                    ctrl->axes[i].target = 0.0f;
+                }
+            }
             log_event("EvHomingDone");
             HardwareSystemHandler::dispatch(EvHomingDone{});
             ctrl->motion_enable = true;
@@ -803,7 +847,9 @@ namespace hardware_system_handler
             ctrl->motion_enable = false;
             for (size_t i = 0; i < count; ++i)
             {
-                ctrl->axes[i].action = ControlAction::Idle;
+                request_axis_state(i, AxisDesiredState::Idle);
+                ctrl->axes[i].motion_enable = false;
+                ctrl->axes[i].target = 0.0f;
             }
         }
 
@@ -834,10 +880,11 @@ namespace hardware_system_handler
             desired_control_.motion_enable = false;
             desired_control_.timestamp_ns = static_cast<uint64_t>(get_clock()->now().nanoseconds());
             desired_control_.sequence_id += 1;
-            for (auto &axis : desired_control_.axes)
+            for (size_t i = 0; i < SHM_MAX_AXES; ++i)
             {
-                axis.action = ControlAction::Idle;
-                axis.target = 0.0f;
+                request_axis_state(i, AxisDesiredState::Idle);
+                desired_control_.axes[i].motion_enable = false;
+                desired_control_.axes[i].target = 0.0f;
             }
             (void)shmitf_.write_control(desired_control_);
             return;
@@ -865,21 +912,11 @@ namespace hardware_system_handler
             const auto interface = cmd_if->axes[i].interface;
             const bool is_brake_axis = interface == CommandInterface::Position;
 
-            // Position axes are spring-brake axes in this hardware profile.
-            // They are independent from wheel motion permission: a positive
-            // brake request closes the loop at its requested position, and a
-            // released brake explicitly returns its axis to IDLE.
-            // One-shot actions are owned by EventHandler and must remain in
-            // desired_control_ until their dedicated request/ack migration.
-            if (ctrl->axes[i].action == ControlAction::ClearErrors ||
-                ctrl->axes[i].action == ControlAction::Homing ||
-                ctrl->axes[i].action == ControlAction::FullCalib)
-            {
-                continue;
-            }
+            ctrl->axes[i].control_mode = interface;
             if (cmd_if->axes[i].action == ControlAction::Idle)
             {
-                ctrl->axes[i].action = ControlAction::Idle;
+                ctrl->axes[i].motion_enable = false;
+                request_axis_state(i, AxisDesiredState::Idle);
                 ctrl->axes[i].target = 0.0f;
                 continue;
             }
@@ -889,7 +926,8 @@ namespace hardware_system_handler
             // closed-loop target.
             if (!is_brake_axis && !ctrl->motion_enable)
             {
-                ctrl->axes[i].action = ControlAction::Idle;
+                ctrl->axes[i].motion_enable = false;
+                request_axis_state(i, AxisDesiredState::Idle);
                 ctrl->axes[i].target = 0.0f;
                 continue;
             }
@@ -900,7 +938,9 @@ namespace hardware_system_handler
             {
                 target = target / (2.0f * 3.141592f);
             }
-            ctrl->axes[i].action = ControlAction::ClosedLoop;
+            ctrl->axes[i].motion_enable = true;
+            request_axis_state(i, AxisDesiredState::ClosedLoop);
+            if (ctrl->axes[i].target != target) ++ctrl->axes[i].target_sequence;
             ctrl->axes[i].target = target;
             RCLCPP_DEBUG_THROTTLE(logger_, *get_clock(), 500,
                                   "ControlCommand: axis=%zu action=ClosedLoop target=%.3f",

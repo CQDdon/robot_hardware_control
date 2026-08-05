@@ -21,7 +21,7 @@ controller_interface::CallbackReturn VehicleController::on_init()
   try {
     auto_declare<std::vector<std::string>>("brake_joints", {"RearRightDriver_Joint"});
     auto_declare<std::vector<std::string>>("wheel_joints", {"RearRightWheel_Joint"});
-    auto_declare<double>("spring_brake_travel_rad", spring_brake_travel_rad_);
+    auto_declare<double>("position_max_offset_turns", position_max_offset_turns_);
     auto_declare<double>("max_wheel_velocity_rad_s", max_wheel_velocity_rad_s_);
     auto_declare<int>("command_timeout_ms", command_timeout_ms_);
     auto_declare<bool>("require_function_command", require_function_command_);
@@ -63,19 +63,17 @@ controller_interface::CallbackReturn VehicleController::on_configure(const rclcp
 {
   brake_joints_ = get_node()->get_parameter("brake_joints").as_string_array();
   wheel_joints_ = get_node()->get_parameter("wheel_joints").as_string_array();
-  spring_brake_travel_rad_ = get_node()->get_parameter("spring_brake_travel_rad").as_double();
+  position_max_offset_turns_ = get_node()->get_parameter("position_max_offset_turns").as_double();
   max_wheel_velocity_rad_s_ = get_node()->get_parameter("max_wheel_velocity_rad_s").as_double();
   command_timeout_ms_ = get_node()->get_parameter("command_timeout_ms").as_int();
   require_function_command_ = get_node()->get_parameter("require_function_command").as_bool();
-  if (brake_joints_.empty() || wheel_joints_.empty() || !std::isfinite(spring_brake_travel_rad_) ||
-      spring_brake_travel_rad_ <= 0.0 || !std::isfinite(max_wheel_velocity_rad_s_) ||
+  if (brake_joints_.empty() || wheel_joints_.empty() || !std::isfinite(position_max_offset_turns_) ||
+      position_max_offset_turns_ <= 0.0 ||
+      !std::isfinite(max_wheel_velocity_rad_s_) ||
       max_wheel_velocity_rad_s_ <= 0.0 || command_timeout_ms_ <= 0) {
     RCLCPP_ERROR(get_node()->get_logger(), "Invalid brake/wheel controller parameters");
     return controller_interface::CallbackReturn::ERROR;
   }
-  brake_reference_position_.assign(brake_joints_.size(), 0.0);
-  brake_target_valid_ = false;
-  latched_brake_percentage_ = -1.0;
 
   motion_sub_ = get_node()->create_subscription<vehicle_msgs::msg::VehicleMotionCommand>(
     "/vehicle/control/motion_cmd", rclcpp::QoS(1),
@@ -89,6 +87,8 @@ controller_interface::CallbackReturn VehicleController::on_configure(const rclcp
   system_rt_pub_ = std::make_shared<realtime_tools::RealtimePublisher<vehicle_msgs::msg::VehicleSystemState>>(system_pub_);
   motion_buffer_.initRT(MotionInput{});
   function_buffer_.initRT(FunctionInput{});
+  position_reference_rad_.assign(brake_joints_.size(), 0.0);
+  position_reference_valid_ = false;
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -137,29 +137,31 @@ bool VehicleController::is_timed_out(int64_t received_ns, const rclcpp::Time & t
     (time.nanoseconds() - received_ns) > static_cast<int64_t>(command_timeout_ms_) * 1000000LL;
 }
 
-void VehicleController::set_brake_command(double brake_percentage, bool force_engaged)
+void VehicleController::set_position_command(double position_percentage, bool force_engaged,
+                                             bool clear_reference_on_release)
 {
   const size_t brake_count = brake_joints_.size();
   const size_t idle_offset = brake_count;
-  const bool release = !force_engaged && brake_percentage <= 0.0;
+  const bool release = !force_engaged && position_percentage <= 0.0;
   if (release) {
     for (size_t i = 0; i < brake_count; ++i) command_interfaces_[idle_offset + i].set_value(1.0);
-    brake_target_valid_ = false;
-    latched_brake_percentage_ = -1.0;
+    // A temporary safety fallback must not turn a held +10/+20/+30 command
+    // into another relative move when the controller becomes safe again.
+    // Only the explicit zero-level command (Z) starts a new reference epoch.
+    if (clear_reference_on_release) position_reference_valid_ = false;
     return;
   }
 
-  const double requested_percentage = force_engaged ? 100.0 : brake_percentage;
-  if (!brake_target_valid_ || std::abs(requested_percentage - latched_brake_percentage_) > 1e-9) {
+  const double requested_percentage = force_engaged ? 100.0 : position_percentage;
+  if (!position_reference_valid_) {
     for (size_t i = 0; i < brake_count; ++i) {
-      brake_reference_position_[i] = state_interfaces_[2 * i].get_value();
+      position_reference_rad_[i] = state_interfaces_[2 * i].get_value();
     }
-    brake_target_valid_ = true;
-    latched_brake_percentage_ = requested_percentage;
+    position_reference_valid_ = true;
   }
+  const double offset_rad = position_max_offset_turns_ * requested_percentage / 100.0 * 2.0 * M_PI;
   for (size_t i = 0; i < brake_count; ++i) {
-    command_interfaces_[i].set_value(brake_reference_position_[i] +
-      spring_brake_travel_rad_ * requested_percentage / 100.0);
+    command_interfaces_[i].set_value(position_reference_rad_[i] + offset_rad);
     command_interfaces_[idle_offset + i].set_value(0.0);
   }
 }
@@ -172,7 +174,7 @@ void VehicleController::write_safe_command()
   if (command_interfaces_.size() != io_offset + 1 || state_interfaces_.size() < 2 * brake_count) return;
   // The brake actuator is released by default.  A safe command stops the
   // wheel and outputs without changing the brake axis out of IDLE.
-  set_brake_command(0.0, false);
+  set_position_command(0.0, false, false);
   for (size_t i = 0; i < wheel_joints_.size(); ++i) command_interfaces_[wheel_offset + i].set_value(0.0);
   command_interfaces_[io_offset].set_value(0.0);
 }
@@ -203,10 +205,10 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
     // E-stop is an explicit brake request. Timeout/startup/normal stop leave
     // the independent brake actuator released.
     if (function.received && function.emergency_stop) {
-      set_brake_command(100.0, false);
+      set_position_command(100.0, false, false);
     }
   } else {
-    set_brake_command(motion.brake_percentage, false);
+    set_position_command(motion.brake_percentage, false, true);
     const double gear_sign = motion.gear == kDrive ? 1.0 : (motion.gear == kReverse ? -1.0 : 0.0);
     // The wheel and brake are two independent actuators. A brake-position
     // request must not alter the wheel velocity command.

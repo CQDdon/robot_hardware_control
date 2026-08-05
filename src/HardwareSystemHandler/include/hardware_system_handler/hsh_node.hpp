@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <deque>
+#include <limits>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
 #include "hardware_ipc_common/shared_memory.hpp"
@@ -30,6 +31,8 @@ namespace hardware_system_handler
         bool refresh_state();
         bool refresh_cmd_if();
         bool refresh_sensor_state();
+        void request_axis_state(size_t axis, AxisDesiredState state);
+        void request_clear_errors(size_t axis);
         bool StartHoming();
         float CommandErrorRate();
         bool CommandVerify();
@@ -66,6 +69,7 @@ namespace hardware_system_handler
         std::array<bool, SHM_MAX_AXES> homing_command_sent_{};
         std::array<bool, SHM_MAX_AXES> homing_started_{};
         std::array<bool, SHM_MAX_AXES> homing_done_{};
+        std::array<bool, SHM_MAX_AXES> clear_error_requested_{};
         std::array<int64_t, SHM_MAX_AXES> homing_command_time_ns_{};
         uint64_t last_timestamp_ns_{0};
         rclcpp::Time wait_sensors_start_{0, 0, RCL_ROS_TIME};
@@ -84,7 +88,10 @@ namespace hardware_system_handler
         uint8_t sensor_count_{0};
 
         float MAX_AXIS_VEL = 200.0f;
-        float MAX_AXIS_POS = 50.0f * 2.0f * 3.141592f;
+        // Temporary bench setting: no mechanical position limit is installed.
+        // Keep the field explicit so a finite bound can be restored before
+        // attaching the mechanism.
+        float MAX_AXIS_POS = std::numeric_limits<float>::infinity();
 
     };
 

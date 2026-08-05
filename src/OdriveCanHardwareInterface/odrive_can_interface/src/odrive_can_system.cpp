@@ -61,7 +61,10 @@ namespace odrive_can_interface
     command_vel_.assign(n, 0.0);
     command_idle_.assign(n, 0.0);
     joint_mode_.resize(n);
-    last_axis_action_.assign(n, ControlAction::None);
+    last_desired_state_generation_.assign(n, 0);
+    last_clear_error_req_id_.assign(n, 0);
+    procedural_state_started_.assign(n, false);
+    last_axis_state_send_time_.assign(n, clock::time_point::min());
 
     // Suy ra mode từng joint theo command_interfaces trong URDF
     for (size_t i = 0; i < n; ++i)
@@ -594,73 +597,75 @@ namespace odrive_can_interface
         const bool have_state = shmitf_.read_state(state);
         const size_t axis_count = std::min(
             static_cast<size_t>(ctrl.axis_count), motors_.size());
-        const size_t action_count = std::min(axis_count, last_axis_action_.size());
-
         for (size_t i = 0; i < axis_count; ++i)
         {
-          const auto action = ctrl.axes[i].action;
-          const bool is_brake_axis = joint_mode_[i] == OdriveMotor::POSITION;
-          if (have_state && !is_axis_online(state.axes[i]))
+          if (!have_state || !is_axis_online(state.axes[i]))
           {
-            last_axis_action_[i] = ControlAction::None;
             continue;
           }
-          ControlAction effective_action = action;
-          // Brake (position) and wheel (velocity) axes are independent.  A
-          // brake must be able to hold its requested position while wheel
-          // motion is disabled; only velocity axes are gated here.
-          if (!is_brake_axis && !ctrl.motion_enable && action == ControlAction::ClosedLoop)
+
+          const auto &axis = ctrl.axes[i];
+          const auto now = clock::now();
+          // time_point::min() is our explicit "not sent yet" marker.  Do
+          // not subtract it from now: that can overflow a signed duration and
+          // suppress the first desired-state command forever.
+          const bool retry_due = last_axis_state_send_time_[i] == clock::time_point::min() ||
+            now - last_axis_state_send_time_[i] >= AXIS_STATE_RETRY_PERIOD;
+          const bool procedural = axis.desired_axis_state == AxisDesiredState::Homing ||
+                                  axis.desired_axis_state == AxisDesiredState::FullCalibration;
+          if (axis.desired_state_generation != last_desired_state_generation_[i])
           {
-            effective_action = ControlAction::Idle;
+            last_desired_state_generation_[i] = axis.desired_state_generation;
+            procedural_state_started_[i] = false;
           }
 
-          bool send_action = false;
-          if (i < action_count)
+          const AxisStateSummary expected =
+            axis.desired_axis_state == AxisDesiredState::Idle ? AxisStateSummary::Idle :
+            axis.desired_axis_state == AxisDesiredState::ClosedLoop ? AxisStateSummary::Running :
+            axis.desired_axis_state == AxisDesiredState::Homing ? AxisStateSummary::Homing :
+            AxisStateSummary::Calibrating;
+          const AxisStateSummary actual = state.axes[i].odrive_state_summary;
+          if (procedural && actual == expected)
           {
-            if (effective_action == ControlAction::None)
+            procedural_state_started_[i] = true;
+          }
+
+          bool send_state = false;
+          if (procedural)
+          {
+            send_state = !procedural_state_started_[i] && retry_due;
+          }
+          else
+          {
+            send_state = actual != expected && retry_due;
+          }
+          if (send_state)
+          {
+            // Rate-limit attempts as well as successes: an unavailable CAN
+            // endpoint must not turn this convergence path into a 5 ms flood.
+            last_axis_state_send_time_[i] = now;
+            switch (axis.desired_axis_state)
             {
-              last_axis_action_[i] = ControlAction::None;
-            }
-            else if (last_axis_action_[i] != effective_action)
-            {
-              last_axis_action_[i] = effective_action;
-              send_action = true;
+            case AxisDesiredState::Idle: (void)motors_[i]->idle(); break;
+            case AxisDesiredState::ClosedLoop: (void)motors_[i]->closeLoopControl(); break;
+            case AxisDesiredState::Homing: (void)motors_[i]->setHoming(); break;
+            case AxisDesiredState::FullCalibration: (void)motors_[i]->fullCalibration(); break;
             }
           }
 
-          if (send_action)
+          if (axis.clear_error_req_id != last_clear_error_req_id_[i] && motors_[i]->clearErrors())
           {
-            switch (effective_action)
-            {
-            case ControlAction::Idle:
-              (void)motors_[i]->idle();
-              break;
-            case ControlAction::ClosedLoop:
-              (void)motors_[i]->closeLoopControl();
-              break;
-            case ControlAction::FullCalib:
-              (void)motors_[i]->fullCalibration();
-              break;
-            case ControlAction::Homing:
-              (void)motors_[i]->setHoming();
-              break;
-            case ControlAction::ClearErrors:
-              (void)motors_[i]->clearErrors();
-              break;
-            case ControlAction::None:
-            default:
-              break;
-            }
+            // H4 limitation: this is local send success only; no HSH ACK exists yet.
+            last_clear_error_req_id_[i] = axis.clear_error_req_id;
           }
 
-          const bool should_send_target = is_brake_axis
-            ? ctrl.axes[i].action == ControlAction::ClosedLoop
-            : ctrl.motion_enable &&
-              (ctrl.axes[i].action == ControlAction::None ||
-               ctrl.axes[i].action == ControlAction::ClosedLoop);
+          const bool should_send_target = have_state && is_axis_online(state.axes[i]) &&
+            ctrl.motion_enable && axis.motion_enable &&
+            axis.desired_axis_state == AxisDesiredState::ClosedLoop &&
+            actual == AxisStateSummary::Running;
           if (should_send_target)
           {
-            float val = static_cast<float>(ctrl.axes[i].target);
+            float val = axis.target;
             (void)motors_[i]->setTarget(val);
           }
         }
