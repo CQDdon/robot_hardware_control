@@ -6,8 +6,8 @@ controller_manager:
 
 vehicle_controller:
   ros__parameters:
-    brake_joints: [RearRightDriver_Joint]
-    wheel_joints: [RearRightWheel_Joint]
+    brake_joints: []
+    wheel_joints: []
     # Axis 4 target is current feedback plus an offset in ODrive turns.
     position_max_offset_turns: 30.0
     # Axis 5 limit: +/-5 turns/s, expressed here in ROS rad/s.

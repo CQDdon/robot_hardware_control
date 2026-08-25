@@ -56,7 +56,10 @@ controller_interface::InterfaceConfiguration VehicleController::state_interface_
     config.names.push_back(joint + "/position");
     config.names.push_back(joint + "/velocity");
   }
-  config.names.insert(config.names.end(), {"system/online", "system/fault", "system/motion_allowed", "relay/relay_mask", "rs485/steering_pot_percent"});
+  if (!brake_joints_.empty() || !wheel_joints_.empty()) {
+    config.names.insert(config.names.end(), {"system/online", "system/fault", "system/motion_allowed"});
+  }
+  config.names.insert(config.names.end(), {"relay/relay_mask", "rs485/steering_pot_percent"});
   return config;
 }
 
@@ -68,11 +71,11 @@ controller_interface::CallbackReturn VehicleController::on_configure(const rclcp
   max_wheel_velocity_rad_s_ = get_node()->get_parameter("max_wheel_velocity_rad_s").as_double();
   command_timeout_ms_ = get_node()->get_parameter("command_timeout_ms").as_int();
   require_function_command_ = get_node()->get_parameter("require_function_command").as_bool();
-  if (brake_joints_.empty() || wheel_joints_.empty() || !std::isfinite(position_max_offset_turns_) ||
+  if (!std::isfinite(position_max_offset_turns_) ||
       position_max_offset_turns_ <= 0.0 ||
       !std::isfinite(max_wheel_velocity_rad_s_) ||
       max_wheel_velocity_rad_s_ <= 0.0 || command_timeout_ms_ <= 0) {
-    RCLCPP_ERROR(get_node()->get_logger(), "Invalid brake/wheel controller parameters");
+    RCLCPP_ERROR(get_node()->get_logger(), "Invalid controller parameters");
     return controller_interface::CallbackReturn::ERROR;
   }
 
@@ -190,14 +193,16 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
   const size_t relay_offset = wheel_offset + wheel_count;
   const size_t throttle_offset = relay_offset + 1;
   const size_t system_state_index = 2 * (brake_count + wheel_count);
-  if (command_interfaces_.size() < throttle_offset + 1 || state_interfaces_.size() < system_state_index + 4) return controller_interface::return_type::ERROR;
+  if (command_interfaces_.size() < throttle_offset + 1) return controller_interface::return_type::ERROR;
   const MotionInput motion = *motion_buffer_.readFromRT();
   const FunctionInput function = *function_buffer_.readFromRT();
   const bool timed_out = is_timed_out(motion.received_ns, time) ||
     (require_function_command_ && is_timed_out(function.received_ns, time));
-  const bool online = state_interfaces_[system_state_index].get_value() > 0.5;
-  const bool fault = state_interfaces_[system_state_index + 1].get_value() > 0.5;
-  const bool hardware_motion_allowed = state_interfaces_[system_state_index + 2].get_value() > 0.5;
+
+  const bool has_system_state = (!brake_joints_.empty() || !wheel_joints_.empty()) && (state_interfaces_.size() >= system_state_index + 3);
+  const bool online = has_system_state ? (state_interfaces_[system_state_index].get_value() > 0.5) : true;
+  const bool fault = has_system_state ? (state_interfaces_[system_state_index + 1].get_value() > 0.5) : false;
+  const bool hardware_motion_allowed = has_system_state ? (state_interfaces_[system_state_index + 2].get_value() > 0.5) : true;
   const bool function_requests_stop = function.received &&
     (function.emergency_stop || !function.motion_enable);
   const bool safe = !motion.received || !motion.valid ||
@@ -241,13 +246,14 @@ void VehicleController::publish_states(const rclcpp::Time & time, const MotionIn
   const size_t brake_count = brake_joints_.size();
   const size_t wheel_count = wheel_joints_.size();
   const size_t wheel_state_offset = 2 * brake_count;
-  const size_t system_state_index = 2 * (brake_count + wheel_count);
   double wheel_velocity = 0.0;
-  for (size_t i = 0; i < wheel_count; ++i) wheel_velocity += state_interfaces_[wheel_state_offset + 2 * i + 1].get_value();
-  wheel_velocity /= static_cast<double>(wheel_count);
+  if (wheel_count > 0) {
+    for (size_t i = 0; i < wheel_count; ++i) wheel_velocity += state_interfaces_[wheel_state_offset + 2 * i + 1].get_value();
+    wheel_velocity /= static_cast<double>(wheel_count);
+  }
   if (motion_rt_pub_ && motion_rt_pub_->trylock()) {
-    const bool has_steering_pot = state_interfaces_.size() >= system_state_index + 5;
-    const float steering_pot_pct = has_steering_pot ? static_cast<float>(state_interfaces_[system_state_index + 4].get_value()) : 0.0F;
+    const size_t pot_index = state_interfaces_.size() > 0 ? (state_interfaces_.size() - 1) : 0;
+    const float steering_pot_pct = (state_interfaces_.size() > 0) ? static_cast<float>(state_interfaces_[pot_index].get_value()) : 0.0F;
 
     auto & out = motion_rt_pub_->msg_;
     out.header.stamp = time;
@@ -261,16 +267,19 @@ void VehicleController::publish_states(const rclcpp::Time & time, const MotionIn
     motion_rt_pub_->unlockAndPublish();
   }
   if (system_rt_pub_ && system_rt_pub_->trylock()) {
+    const size_t system_state_index = 2 * (brake_count + wheel_count);
+    const bool has_system_state = (!brake_joints_.empty() || !wheel_joints_.empty()) && (state_interfaces_.size() >= system_state_index + 3);
+    const size_t relay_state_index = has_system_state ? (system_state_index + 3) : 0;
     auto & out = system_rt_pub_->msg_;
     out.header.stamp = time;
-    out.hardware_online = state_interfaces_[system_state_index].get_value() > 0.5;
-    out.hardware_fault = state_interfaces_[system_state_index + 1].get_value() > 0.5;
-    out.hardware_motion_allowed = state_interfaces_[system_state_index + 2].get_value() > 0.5;
+    out.hardware_online = has_system_state ? (state_interfaces_[system_state_index].get_value() > 0.5) : true;
+    out.hardware_fault = has_system_state ? (state_interfaces_[system_state_index + 1].get_value() > 0.5) : false;
+    out.hardware_motion_allowed = has_system_state ? (state_interfaces_[system_state_index + 2].get_value() > 0.5) : true;
     out.function_motion_enabled = function.motion_enable;
     out.emergency_stop = function.emergency_stop;
     out.command_timed_out = timed_out;
     out.safe_command_active = safe;
-    out.io_output_mask = safe ? 0 : static_cast<uint8_t>(state_interfaces_[system_state_index + 3].get_value());
+    out.io_output_mask = (state_interfaces_.size() > relay_state_index) ? static_cast<uint8_t>(state_interfaces_[relay_state_index].get_value()) : 0;
     system_rt_pub_->unlockAndPublish();
   }
 }
