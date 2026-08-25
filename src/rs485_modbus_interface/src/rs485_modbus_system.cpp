@@ -27,6 +27,8 @@ hardware_interface::CallbackReturn Rs485ModbusSystem::on_init(
     input_slave_id_ = static_cast<uint8_t>(std::stoi(info.hardware_parameters.at("input_slave_id")));
   if (info.hardware_parameters.count("output_slave_id"))
     output_slave_id_ = static_cast<uint8_t>(std::stoi(info.hardware_parameters.at("output_slave_id")));
+  if (info.hardware_parameters.count("ao_register"))
+    ao_register_ = static_cast<uint16_t>(std::stoul(info.hardware_parameters.at("ao_register"), nullptr, 0));
   if (info.hardware_parameters.count("ao_mode"))
     ao_mode_ = info.hardware_parameters.at("ao_mode");
   if (info.hardware_parameters.count("ao_raw_max"))
@@ -34,8 +36,8 @@ hardware_interface::CallbackReturn Rs485ModbusSystem::on_init(
 
   (void)shmitf_.open(false);
 
-  RCLCPP_INFO(logger_, "Rs485ModbusSystem initialized: port=%s, baud=%d, input_id=%d, output_id=%d, ao_mode=%s",
-              port_.c_str(), baud_rate_, input_slave_id_, output_slave_id_, ao_mode_.c_str());
+  RCLCPP_INFO(logger_, "Rs485ModbusSystem initialized: port=%s, baud=%d, input_id=%d, output_id=%d, ao_reg=0x%04X, ao_mode=%s, ao_max=%.1f",
+              port_.c_str(), baud_rate_, input_slave_id_, output_slave_id_, ao_register_, ao_mode_.c_str(), ao_raw_max_);
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -313,13 +315,13 @@ void Rs485ModbusSystem::modbus_worker_loop()
 
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
-    // 2. Ghi AO 0x0006 xuống Output Module (ID = 2)
+    // 2. Ghi AO8 (Register ao_register_, mặc định 0x0007) xuống Output Module (ID = 2)
     const float throttle = std::clamp(target_throttle_voltage_.load(std::memory_order_relaxed), 0.0f, 5.0f);
     uint16_t ao_raw = static_cast<uint16_t>(std::clamp(std::lround((throttle / 5.0f) * ao_raw_max_), 0L, 65535L));
 
     if (ao_raw != last_ao_val)
     {
-      if (modbus_write_ao(output_slave_id_, 0x0006, ao_raw))
+      if (modbus_write_ao(output_slave_id_, ao_register_, ao_raw))
       {
         last_ao_val = ao_raw;
       }
@@ -328,7 +330,7 @@ void Rs485ModbusSystem::modbus_worker_loop()
     std::this_thread::sleep_for(std::chrono::milliseconds(20)); // ~30-40Hz
   }
 
-  (void)modbus_write_ao(output_slave_id_, 0x0006, 0);
+  (void)modbus_write_ao(output_slave_id_, ao_register_, 0);
 }
 
 } // namespace rs485_modbus_interface

@@ -54,8 +54,9 @@ private:
   int baud_rate_{9600};
   uint8_t input_slave_id_{1};
   uint8_t output_slave_id_{2};
-  std::string ao_mode_{"current"}; // "current" (0-20mA) hoặc "voltage"
-  double ao_raw_max_{20000.0};     // 20000 uA cho current hoặc 4095/5000 cho voltage
+  uint16_t ao_register_{0x0007};   // Physical AO8 -> Register 0x0007
+  std::string ao_mode_{"voltage"}; // "voltage" (0-5V) hoặc "current" (0-20mA)
+  double ao_raw_max_{5000.0};      // 5000.0 cho 0-5V (mV) hoặc 20000.0 cho 0-20mA (uA)
 
   int serial_fd_{-1};
   std::atomic<bool> running_{false};

@@ -92,7 +92,7 @@ void print_dashboard(const HwiStateBlock& state, const HwiCommandIfBlock& cmd_if
               << std::fixed << std::setprecision(2) << estop_v << " V " << RESET
               << (estop_triggered ? RED "[STOPPED / PRESSED]" RESET : GREEN "[NORMAL / RELEASED]" RESET) << "\n";
     std::cout << "  * Steering Pot (AI 0x0007)   : " << CYAN << std::fixed << std::setprecision(1) << state.rs485.steering_pot_percent << " %" << RESET << "\n";
-    std::cout << "  * Throttle Output (AO 0x0006): " << CYAN << std::fixed << std::setprecision(2) << ctrl.rs485.throttle_voltage << " V" << RESET << "\n";
+    std::cout << "  * Throttle Output (AO8 / 0x0007): " << CYAN << std::fixed << std::setprecision(2) << ctrl.rs485.throttle_voltage << " V" << RESET << "\n";
     
     // Relay Mask in binary & hex
     std::cout << "  * ESP32 Relay Mask (ID 0x500): " << YELLOW << "0x" 

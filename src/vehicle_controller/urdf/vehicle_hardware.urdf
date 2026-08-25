@@ -36,8 +36,9 @@
       <param name="baud_rate">9600</param>
       <param name="input_slave_id">1</param>
       <param name="output_slave_id">2</param>
-      <param name="ao_mode">current</param>
-      <param name="ao_raw_max">20000.0</param>
+      <param name="ao_register">0x0007</param>
+      <param name="ao_mode">voltage</param>
+      <param name="ao_raw_max">5000.0</param>
     </hardware>
     <gpio name="rs485">
       <state_interface name="is_auto_mode"/>
