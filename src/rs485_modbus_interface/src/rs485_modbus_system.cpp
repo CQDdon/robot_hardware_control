@@ -310,8 +310,10 @@ void Rs485ModbusSystem::modbus_worker_loop()
       const float v_estop = std::clamp((static_cast<float>(ai_regs[1]) / ai_max) * 5.0f, 0.0f, 5.0f);
       const float pot_pct = std::clamp((static_cast<float>(ai_regs[2]) / ai_max) * 100.0f, 0.0f, 100.0f);
 
-      // Logic: > 4.7V là Manual, <= 4.7V là Auto
-      is_auto_mode_.store(v_auto <= 4.7f, std::memory_order_relaxed);
+      // Logic gốc: > 4.7V là Manual, <= 4.7V là Auto
+      // is_auto_mode_.store(v_auto <= 4.7f, std::memory_order_relaxed);
+      // Tạm thời ép luôn Auto Mode (luôn true) để test:
+      is_auto_mode_.store(true, std::memory_order_relaxed);
       e_stop_voltage_.store(v_estop, std::memory_order_relaxed);
       steering_pot_percent_.store(pot_pct, std::memory_order_relaxed);
     }

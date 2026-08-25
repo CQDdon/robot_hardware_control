@@ -825,7 +825,10 @@ namespace hardware_system_handler
             homing_done_.fill(false);
         }
 
-        const bool is_auto = have_state_snapshot_ && (last_state_.rs485.is_auto_mode != 0);
+        // Logic gốc:
+        // const bool is_auto = have_state_snapshot_ && (last_state_.rs485.is_auto_mode != 0);
+        // Tạm thời ép luôn Auto Mode (luôn true) để test:
+        const bool is_auto = true;
 
         if (current_state == FsmState::Ready)
         {
