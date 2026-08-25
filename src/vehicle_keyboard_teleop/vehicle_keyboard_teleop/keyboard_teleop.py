@@ -37,10 +37,11 @@ class VehicleKeyboardTeleop(Node):
 
     def _set_safe_state(self):
         self.throttle = 0.0
+        self.steering_velocity = 0.0
         # Position axis is released (IDLE) by default. Space selects one of
         # three relative offsets: current +10, +20, or +30 turns.
         self.position_level = 0
-        self.gear = VehicleMotionCommand.GEAR_NEUTRAL
+        self.gear = VehicleMotionCommand.GEAR_DRIVE
         self.motion_enable = False
         self.emergency_stop = False
         self.io_output_mask = 0
@@ -58,10 +59,10 @@ class VehicleKeyboardTeleop(Node):
             self._terminal_settings = None
 
     def _print_help(self):
-        print('\nVehicle keyboard teleop (publish 20 Hz mặc định)')
-        print('W/S tốc độ axis 5 +/- | Space: axis 4 +10/+20/+30 turns | Z nhả axis 4')
-        print('R tiến | F lùi | N neutral | E bật/tắt motion | X E-stop | Q thoát an toàn')
-        print('1..8: bật/tắt Q0..Q7; 0: tắt toàn bộ Q0..Q7. Output bị ép 0 khi ở safe state.\n')
+        print('\n=== Vehicle Keyboard Teleop (Controller Test API) ===')
+        print('W/S: Ga (Throttle AO RS485 +/-) | A/D: Vận tốc đánh lái (ODrive Steer +/-) | C: Dừng lái (0 rad/s)')
+        print('Space: Phanh +10/+20/+30 turns | Z: Nhả phanh | E: Bật/Tắt Motion | X: E-stop | Q: Thoát')
+        print('1..8: Bật/Tắt Relay 1..8; 0: Tắt toàn bộ Relay.\n')
 
     @staticmethod
     def _clamp(value, low, high):
@@ -79,6 +80,12 @@ class VehicleKeyboardTeleop(Node):
             self.throttle = self._clamp(self.throttle + self.throttle_step, 0.0, self.max_throttle)
         elif key == 's':
             self.throttle = self._clamp(self.throttle - self.throttle_step, 0.0, self.max_throttle)
+        elif key == 'a':
+            self.steering_velocity = self._clamp(self.steering_velocity - 2.0, -20.0, 20.0)
+        elif key == 'd':
+            self.steering_velocity = self._clamp(self.steering_velocity + 2.0, -20.0, 20.0)
+        elif key == 'c':
+            self.steering_velocity = 0.0
         elif key == ' ':
             self.position_level = min(self.position_level + 1, 3)
         elif key == 'z':
@@ -95,7 +102,7 @@ class VehicleKeyboardTeleop(Node):
             self.emergency_stop = True
             self.motion_enable = False
             self.throttle = 0.0
-            self.brake = self.max_brake
+            self.steering_velocity = 0.0
         elif key in '12345678':
             self.io_output_mask ^= 1 << (int(key) - 1)
         elif key == '0':
@@ -109,7 +116,7 @@ class VehicleKeyboardTeleop(Node):
 
     def publish_commands(self):
         motion = VehicleMotionCommand()
-        motion.steering_angle_rad = 0.0
+        motion.steering_angle_rad = float(self.steering_velocity)
         motion.speed_percentage = float(self.throttle)
         motion.brake_percentage = 100.0 * self.position_level / 3.0
         motion.gear = self.gear
@@ -121,11 +128,12 @@ class VehicleKeyboardTeleop(Node):
         self.function_pub.publish(function)
 
     def _display_state(self):
-        gear = {VehicleMotionCommand.GEAR_NEUTRAL: 'N', VehicleMotionCommand.GEAR_DRIVE: 'D',
-                VehicleMotionCommand.GEAR_REVERSE: 'R'}[self.gear]
-        text = (f'\r velocity={self.throttle:5.1f}% | '
-                f'axis4_offset=+{10 * self.position_level} turns | gear={gear} | motion={"ON " if self.motion_enable else "OFF"} | '
-                f'estop={"ON " if self.emergency_stop else "OFF"} | Q=[{self.io_output_mask:02X}]   ')
+        text = (f'\r Ga={self.throttle:5.1f}% | '
+                f'V_Lái={self.steering_velocity:+5.1f} rad/s | '
+                f'Phanh=+{10 * self.position_level} turns | '
+                f'Motion={"ON " if self.motion_enable else "OFF"} | '
+                f'Estop={"ON " if self.emergency_stop else "OFF"} | '
+                f'Relay=[0x{self.io_output_mask:02X}]   ')
         sys.stdout.write(text)
         sys.stdout.flush()
 

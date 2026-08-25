@@ -1,0 +1,8 @@
+<library path="rs485_modbus_interface">
+  <class
+    name="rs485_modbus_interface/Rs485ModbusSystem"
+    type="rs485_modbus_interface::Rs485ModbusSystem"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>RS485 Modbus RTU ROS2 Control hardware interface</description>
+  </class>
+</library>

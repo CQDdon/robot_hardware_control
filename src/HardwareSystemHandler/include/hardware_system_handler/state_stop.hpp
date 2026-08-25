@@ -9,7 +9,7 @@ public:
     void entry()
     {
         motion_allowed_ = false;
-        RCLCPP_WARN(logger_, "STOP State engaged");
+        RCLCPP_WARN(logger_, "STOP State engaged: Locking brakes, disabling wheels and throttle");
     }
 
     void exit() {}

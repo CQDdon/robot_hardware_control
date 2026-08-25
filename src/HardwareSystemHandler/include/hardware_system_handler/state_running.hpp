@@ -4,6 +4,7 @@
 
 class FAULT;
 class OFFLINE;
+class STOP;
 
 class RUNNING : public HshFsm {
 public:
@@ -24,6 +25,10 @@ public:
 
     void react(EvAxisError const&) override {
         transit<FAULT>();
+    }
+
+    void react(EvCriticalError const&) override {
+        transit<STOP>();
     }
 
     template <typename Event>

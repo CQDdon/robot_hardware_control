@@ -18,7 +18,7 @@ namespace hardware_system_handler
     class HshNode : public rclcpp::Node
     {
     public:
-        HshNode();
+        explicit HshNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
         ~HshNode() override = default;
 
     private:
@@ -92,6 +92,11 @@ namespace hardware_system_handler
         // Keep the field explicit so a finite bound can be restored before
         // attaching the mechanism.
         float MAX_AXIS_POS = std::numeric_limits<float>::infinity();
+
+        bool estop_brake_latched_{false};
+        float estop_brake_target_[SHM_MAX_AXES]{0.0f};
+        bool brake_reference_valid_[SHM_MAX_AXES]{false};
+        float brake_reference_turns_[SHM_MAX_AXES]{0.0f};
 
     };
 

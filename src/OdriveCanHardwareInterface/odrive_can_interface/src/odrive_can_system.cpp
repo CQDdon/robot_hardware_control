@@ -65,6 +65,8 @@ namespace odrive_can_interface
     last_clear_error_req_id_.assign(n, 0);
     procedural_state_started_.assign(n, false);
     last_axis_state_send_time_.assign(n, clock::time_point::min());
+    last_sent_target_.assign(n, std::numeric_limits<float>::quiet_NaN());
+    last_target_send_time_.assign(n, clock::time_point::min());
 
     // Suy ra mode từng joint theo command_interfaces trong URDF
     for (size_t i = 0; i < n; ++i)
@@ -131,7 +133,6 @@ namespace odrive_can_interface
     out.emplace_back("system", "online", &hardware_online_);
     out.emplace_back("system", "fault", &hardware_fault_);
     out.emplace_back("system", "motion_allowed", &motion_allowed_);
-    out.emplace_back("io", "output_mask", &io_output_mask_state_);
     return out;
   }
 
@@ -153,7 +154,6 @@ namespace odrive_can_interface
         out.emplace_back(jn, "idle", &command_idle_[i]);
       }
     }
-    out.emplace_back("io", "output_mask", &io_output_mask_command_);
     return out;
   }
 
@@ -337,9 +337,6 @@ namespace odrive_can_interface
       hardware_fault_ = (hardware_fault_ != 0.0 || any_fault) ? 1.0 : 0.0;
       motion_allowed_ = (shmitf_.read_control(control) && control.motion_enable && all_online && !any_fault) ? 1.0 : 0.0;
     }
-    // Report the mask confirmed by the MCU, not merely the command queued for
-    // transmission. A mismatch with the requested mask means a retry remains.
-    io_output_mask_state_ = static_cast<double>(io_output_mask_feedback_.load());
     return hardware_interface::return_type::OK;
   }
 
@@ -374,12 +371,6 @@ namespace odrive_can_interface
         out.axes[i].action = command_idle_[i] >= 0.5 ? ControlAction::Idle : ControlAction::ClosedLoop;
       }
     }
-
-    // The IO firmware accepts a one-byte output bitmask. Clamp invalid command
-    // values here so any controller using this interface cannot emit bad data.
-    const double requested_mask = std::isfinite(io_output_mask_command_) ? io_output_mask_command_ : 0.0;
-    const auto clamped_mask = static_cast<uint8_t>(std::clamp(std::lround(requested_mask), 0L, 255L));
-    io_output_mask_pending_.store(clamped_mask);
 
     (void)shmitf_.write_cmd_if(out);
     return hardware_interface::return_type::OK;
@@ -521,13 +512,6 @@ namespace odrive_can_interface
     can_->registerFeedbackCallback([this](uint32_t can_id, const uint8_t *data, uint8_t dlc)
                                    {
     const uint32_t standard_id = can_id & CAN_SFF_MASK;
-    if (standard_id == 0x101 && dlc >= 1)
-    {
-      io_output_mask_feedback_.store(data[0]);
-      io_output_feedback_received_.store(true);
-      return;
-    }
-
     const uint32_t axis = (standard_id >> 5);
     for (auto &m : motors_) {
       if (m->getDeviceId() == axis) { m->onCanFeedback(standard_id, data, dlc); break; }
@@ -536,10 +520,6 @@ namespace odrive_can_interface
     can_->startReceive();
 
     auto next_time = clock::now();
-    uint8_t last_io_output_mask = 0xFF;  // force an all-off frame after CAN opens
-    auto next_io_retry = clock::now();
-    auto io_ack_deadline = clock::time_point::max();
-    bool io_ack_timeout_reported = false;
     while (running_ || deactivating_)
     {
       next_time += TX_FRE;
@@ -558,34 +538,6 @@ namespace odrive_can_interface
       }
       if (shmitf_.ready())
       {
-        const uint8_t output_mask = io_output_mask_pending_.load();
-        const bool output_acknowledged = io_output_feedback_received_.load() &&
-          io_output_mask_feedback_.load() == output_mask;
-        const bool output_changed = output_mask != last_io_output_mask;
-        const auto now = clock::now();
-        if (output_changed)
-        {
-          io_ack_deadline = now + IO_ACK_TIMEOUT;
-          io_ack_timeout_reported = false;
-        }
-        const bool retry_due = !output_acknowledged && clock::now() >= next_io_retry;
-        if (output_changed || retry_due)
-        {
-          (void)can_->sendFrame(0x100, {output_mask});
-          last_io_output_mask = output_mask;
-          next_io_retry = clock::now() + IO_RETRY_PERIOD;
-        }
-        if (output_acknowledged)
-        {
-          io_ack_timeout_reported = false;
-        }
-        else if (!io_ack_timeout_reported && now >= io_ack_deadline)
-        {
-          RCLCPP_WARN(can_transmit_logger_,
-                      "I/O ACK timeout: requested Q mask 0x%02X, latest 0x101 feedback 0x%02X; retrying",
-                      output_mask, io_output_mask_feedback_.load());
-          io_ack_timeout_reported = true;
-        }
         HshControlBlock ctrl{};
         if (!shmitf_.read_control(ctrl))
         {
@@ -660,13 +612,31 @@ namespace odrive_can_interface
           }
 
           const bool should_send_target = have_state && is_axis_online(state.axes[i]) &&
-            ctrl.motion_enable && axis.motion_enable &&
+            (ctrl.motion_enable || axis.control_mode == CommandInterface::Position) &&
+            axis.motion_enable &&
             axis.desired_axis_state == AxisDesiredState::ClosedLoop &&
             actual == AxisStateSummary::Running;
           if (should_send_target)
           {
             float val = axis.target;
-            (void)motors_[i]->setTarget(val);
+            const bool target_changed = (i >= last_sent_target_.size()) ||
+              std::isnan(last_sent_target_[i]) ||
+              std::abs(val - last_sent_target_[i]) > 0.005f;
+            const bool heartbeat_due = (i >= last_target_send_time_.size()) ||
+              last_target_send_time_[i] == clock::time_point::min() ||
+              (now - last_target_send_time_[i] >= TARGET_HEARTBEAT_PERIOD);
+
+            if (target_changed || heartbeat_due)
+            {
+              if (motors_[i]->setTarget(val))
+              {
+                if (i < last_sent_target_.size())
+                {
+                  last_sent_target_[i] = val;
+                  last_target_send_time_[i] = now;
+                }
+              }
+            }
           }
         }
       }

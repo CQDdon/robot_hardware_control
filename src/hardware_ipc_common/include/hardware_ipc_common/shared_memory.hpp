@@ -163,6 +163,45 @@ inline AxisStateSummary map_odrive_axis_state_summary(uint8_t axis_state)
     }
 }
 
+struct Rs485StateBlock
+{
+    uint8_t is_auto_mode;          // 1 = Auto (AI 0x0005 >= 2.5V), 0 = Manual
+    uint8_t reserved_u8_0;
+    uint16_t reserved_u16_0;
+    float e_stop_voltage;          // Đọc từ AI 0x0006 (0.0 - 5.0 V)
+    float steering_pot_percent;    // Đọc từ AI 0x0007 (0.0 - 100.0 %)
+
+    Rs485StateBlock()
+        : is_auto_mode(0), reserved_u8_0(0), reserved_u16_0(0),
+          e_stop_voltage(0.0f), steering_pot_percent(0.0f)
+    {
+    }
+};
+
+struct Rs485CommandBlock
+{
+    float throttle_voltage;        // Điện áp chân ga ghi xuống AO 0x0006 (0.0 - 5.0 V)
+    uint32_t reserved_u32_0;
+
+    Rs485CommandBlock()
+        : throttle_voltage(0.0f), reserved_u32_0(0)
+    {
+    }
+};
+
+struct RelayCommandBlock
+{
+    uint8_t relay_mask;            // 8-bit mask điều khiển relay
+    uint8_t reserved_u8_0;
+    uint16_t reserved_u16_0;
+    uint32_t reserved_u32_0;
+
+    RelayCommandBlock()
+        : relay_mask(0), reserved_u8_0(0), reserved_u16_0(0), reserved_u32_0(0)
+    {
+    }
+};
+
 struct HwiStateBlock
 {
     uint64_t timestamp_ns;
@@ -171,10 +210,11 @@ struct HwiStateBlock
     uint8_t reserved_u8_1;
     uint8_t axis_count;
     AxisFeedbackLite axes[SHM_MAX_AXES];
+    Rs485StateBlock rs485;
 
     HwiStateBlock()
         : sequence_id(0), timestamp_ns(0), axis_count(0),
-          reserved_u8_1(0), reserved_u16_1(0)
+          reserved_u8_1(0), reserved_u16_1(0), rs485()
     {
         for (auto &axis : axes)
         {
@@ -267,10 +307,12 @@ struct HwiCommandIfBlock
     uint8_t reserved_u8_0;
     uint8_t axis_count;
     AxisCommandIf axes[SHM_MAX_AXES];
+    Rs485CommandBlock rs485;
+    RelayCommandBlock relay;
 
     HwiCommandIfBlock()
         : sequence_id(0), timestamp_ns(0), axis_count(0),
-          reserved_u8_0(0), reserved_u16_0(0)
+          reserved_u8_0(0), reserved_u16_0(0), rs485(), relay()
     {
         for (auto &axis : axes)
         {
@@ -311,10 +353,12 @@ struct HshControlBlock
     SafetyAction safety_action;
     uint8_t debug_enable;
     AxisControl axes[SHM_MAX_AXES];
+    Rs485CommandBlock rs485;
+    RelayCommandBlock relay;
 
     HshControlBlock()
         : sequence_id(0), timestamp_ns(0), axis_count(0), motion_enable(0),
-          safety_action(SafetyAction::None), debug_enable(0)
+          safety_action(SafetyAction::None), debug_enable(0), rs485(), relay()
     {
         for (auto &axis : axes)
         {
@@ -323,6 +367,9 @@ struct HshControlBlock
     }
 };
 
+static_assert(std::is_trivially_copyable<Rs485StateBlock>::value);
+static_assert(std::is_trivially_copyable<Rs485CommandBlock>::value);
+static_assert(std::is_trivially_copyable<RelayCommandBlock>::value);
 static_assert(std::is_trivially_copyable<HwiCommandIfBlock>::value);
 static_assert(std::is_trivially_copyable<HwiStateBlock>::value);
 static_assert(std::is_trivially_copyable<HwiStateDebugBlock>::value);

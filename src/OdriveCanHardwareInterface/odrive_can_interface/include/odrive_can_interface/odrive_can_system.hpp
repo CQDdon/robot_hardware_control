@@ -82,15 +82,6 @@ namespace odrive_can_interface
         double hardware_online_{0.0};
         double hardware_fault_{1.0};
         double motion_allowed_{0.0};
-        // Firmware digital output mask, Q0 at bit 0. Exported as a ros2_control command/state pair.
-        double io_output_mask_command_{0.0};
-        double io_output_mask_state_{0.0};
-        // MCU acknowledgement received on CAN ID 0x101.  This is separate
-        // from the requested mask so the transmitter can retry until the
-        // remote side confirms the requested output state.
-        std::atomic<uint8_t> io_output_mask_pending_{0};
-        std::atomic<uint8_t> io_output_mask_feedback_{0};
-        std::atomic<bool> io_output_feedback_received_{false};
 
         std::vector<OdriveMotor::ControlMode> joint_mode_;
         std::vector<double> command_pos_;
@@ -102,6 +93,9 @@ namespace odrive_can_interface
         std::vector<uint64_t> last_clear_error_req_id_;
         std::vector<bool> procedural_state_started_;
         std::vector<std::chrono::steady_clock::time_point> last_axis_state_send_time_;
+        std::vector<float> last_sent_target_;
+        std::vector<std::chrono::steady_clock::time_point> last_target_send_time_;
+        static constexpr std::chrono::milliseconds TARGET_HEARTBEAT_PERIOD{1000};
 
     // Shared memory 
         hardware_ipc_common::SharedMemoryInterface shmitf_;

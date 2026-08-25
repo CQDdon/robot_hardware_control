@@ -158,7 +158,7 @@ namespace hardware_system_handler
         clear_error_requested_[axis] = true;
     }
 
-    HshNode::HshNode() : rclcpp::Node("hsh_node")
+    HshNode::HshNode(const rclcpp::NodeOptions & options) : rclcpp::Node("hsh_node", options)
     {
         bypass_position_homing_ = this->declare_parameter<bool>("bypass_position_homing", false);
         homing_required_ = !bypass_position_homing_;
@@ -457,7 +457,7 @@ namespace hardware_system_handler
         const bool state_looks_initialized =
             (state->axis_count > 0) || (state->sequence_id != 0) || (state->timestamp_ns != 0);
 
-        const auto current_state = get_fsm_state();
+        auto current_state = get_fsm_state();
         if (static_cast<int>(current_state) != last_fsm_state_)
         {
             const int prev_fsm_state = last_fsm_state_;
@@ -640,6 +640,17 @@ namespace hardware_system_handler
             (current_state == FsmState::Ready) ||
             (current_state == FsmState::Running);
 
+        // E-Stop Voltage check: If > 4.7V (floating / switch pressed), immediately trigger EvCriticalError to enter STOP
+        if (have_state_snapshot_ && last_state_.rs485.e_stop_voltage > 4.7f && current_state != FsmState::Stop)
+        {
+            RCLCPP_ERROR_THROTTLE(logger_, *get_clock(), 500,
+                                  "E-Stop switch active detected (%.2f V > 4.7V)! Dispatching EvCriticalError to STOP.",
+                                  last_state_.rs485.e_stop_voltage);
+            log_event("EvCriticalError (E-Stop)");
+            HardwareSystemHandler::dispatch(EvCriticalError{});
+            current_state = get_fsm_state();
+        }
+
         if (safe_state && any_offline)
         {
             log_event("EvAxisOffline");
@@ -814,21 +825,33 @@ namespace hardware_system_handler
             homing_done_.fill(false);
         }
 
+        const bool is_auto = have_state_snapshot_ && (last_state_.rs485.is_auto_mode != 0);
+
         if (current_state == FsmState::Ready)
         {
-            if (homing_required_)
+            if (!is_auto)
             {
+                // Manual mode: Lock throttle and prevent auto enable
                 ctrl->motion_enable = false;
-                log_event("EvHomingRequired");
-                HardwareSystemHandler::dispatch(EvHomingRequired{});
-                return;
+                motion_allowed_.store(false);
+                ctrl->rs485.throttle_voltage = 0.0f;
             }
-
-            if (CommandVerify())
+            else
             {
-                log_event("EvEnableCmd");
-                HardwareSystemHandler::dispatch(EvEnableCmd{});
-                ctrl->motion_enable = true;
+                if (homing_required_)
+                {
+                    ctrl->motion_enable = false;
+                    log_event("EvHomingRequired");
+                    HardwareSystemHandler::dispatch(EvHomingRequired{});
+                    return;
+                }
+
+                if (CommandVerify())
+                {
+                    log_event("EvEnableCmd");
+                    HardwareSystemHandler::dispatch(EvEnableCmd{});
+                    ctrl->motion_enable = true;
+                }
             }
         }
 
@@ -839,17 +862,70 @@ namespace hardware_system_handler
                 log_event("EvSensorsTimeout");
                 HardwareSystemHandler::dispatch(EvSensorsTimeout{});
             }
+            if (!is_auto)
+            {
+                // Manual mode while in Running: disable motion, force idle and lock throttle
+                ctrl->motion_enable = false;
+                motion_allowed_.store(false);
+                ctrl->rs485.throttle_voltage = 0.0f;
+            }
+            else
+            {
+                motion_allowed_.store(true);
+                ctrl->motion_enable = true;
+            }
         }
 
         if (current_state == FsmState::Stop)
         {
             motion_allowed_.store(false);
             ctrl->motion_enable = false;
+            ctrl->rs485.throttle_voltage = 0.0f;
+            ctrl->relay.relay_mask = 0x00;
+
+            if (!estop_brake_latched_)
+            {
+                for (size_t i = 0; i < count; ++i)
+                {
+                    if (cmd_if->axes[i].interface == CommandInterface::Position)
+                    {
+                        const float cur_turns = state->axes[i].position / (2.0f * 3.141592f);
+                        if (!brake_reference_valid_[i])
+                        {
+                            brake_reference_turns_[i] = cur_turns;
+                            brake_reference_valid_[i] = true;
+                        }
+                        // Chốt target 100% phanh = Vị trí gốc nhả phanh + 30.0 vòng
+                        // (Ví dụ: đang đạp +20 vòng thì chỉ kéo thêm đúng +10 vòng nữa)
+                        estop_brake_target_[i] = brake_reference_turns_[i] + 30.0f;
+                    }
+                    else
+                    {
+                        estop_brake_target_[i] = 0.0f;
+                    }
+                }
+                estop_brake_latched_ = true;
+            }
+
             for (size_t i = 0; i < count; ++i)
             {
-                request_axis_state(i, AxisDesiredState::Idle);
-                ctrl->axes[i].motion_enable = false;
-                ctrl->axes[i].target = 0.0f;
+                const auto interface = cmd_if->axes[i].interface;
+                if (interface == CommandInterface::Position)
+                {
+                    // Trục phanh: Khóa cứng ở Closed Loop tại target +30 vòng đã chốt
+                    request_axis_state(i, AxisDesiredState::ClosedLoop);
+                    ctrl->axes[i].control_mode = CommandInterface::Position;
+                    ctrl->axes[i].motion_enable = true;
+                    if (ctrl->axes[i].target != estop_brake_target_[i]) ++ctrl->axes[i].target_sequence;
+                    ctrl->axes[i].target = estop_brake_target_[i];
+                }
+                else
+                {
+                    // Trục lái: Về IDLE
+                    request_axis_state(i, AxisDesiredState::Idle);
+                    ctrl->axes[i].motion_enable = false;
+                    ctrl->axes[i].target = 0.0f;
+                }
             }
         }
 
@@ -902,6 +978,57 @@ namespace hardware_system_handler
         ctrl->timestamp_ns = static_cast<uint64_t>(get_clock()->now().nanoseconds());
         ctrl->sequence_id += 1;
 
+        const auto current_state = get_fsm_state();
+        if (current_state == FsmState::Stop)
+        {
+            ctrl->motion_enable = false;
+            ctrl->rs485.throttle_voltage = 0.0f;
+            ctrl->relay.relay_mask = 0x00;
+
+            if (!estop_brake_latched_)
+            {
+                for (size_t i = 0; i < count; ++i)
+                {
+                    if (cmd_if->axes[i].interface == CommandInterface::Position)
+                    {
+                        const float cur_turns = state->axes[i].position / (2.0f * 3.141592f);
+                        if (!brake_reference_valid_[i])
+                        {
+                            brake_reference_turns_[i] = cur_turns;
+                            brake_reference_valid_[i] = true;
+                        }
+                        estop_brake_target_[i] = brake_reference_turns_[i] + 30.0f;
+                    }
+                    else
+                    {
+                        estop_brake_target_[i] = 0.0f;
+                    }
+                }
+                estop_brake_latched_ = true;
+            }
+
+            for (size_t i = 0; i < count; ++i)
+            {
+                const auto interface = cmd_if->axes[i].interface;
+                if (interface == CommandInterface::Position)
+                {
+                    request_axis_state(i, AxisDesiredState::ClosedLoop);
+                    ctrl->axes[i].control_mode = CommandInterface::Position;
+                    ctrl->axes[i].motion_enable = true;
+                    if (ctrl->axes[i].target != estop_brake_target_[i]) ++ctrl->axes[i].target_sequence;
+                    ctrl->axes[i].target = estop_brake_target_[i];
+                }
+                else
+                {
+                    request_axis_state(i, AxisDesiredState::Idle);
+                    ctrl->axes[i].motion_enable = false;
+                    ctrl->axes[i].target = 0.0f;
+                }
+            }
+            (void)shmitf_.write_control(desired_control_);
+            return;
+        }
+
         if (!HshNode::CommandVerify())
         {
             return;
@@ -915,6 +1042,12 @@ namespace hardware_system_handler
             ctrl->axes[i].control_mode = interface;
             if (cmd_if->axes[i].action == ControlAction::Idle)
             {
+                if (is_brake_axis)
+                {
+                    // Khi đang nhả phanh (Idle), liên tục ghi nhận vị trí gốc tham chiếu 0%
+                    brake_reference_turns_[i] = state->axes[i].position / (2.0f * 3.141592f);
+                    brake_reference_valid_[i] = true;
+                }
                 ctrl->axes[i].motion_enable = false;
                 request_axis_state(i, AxisDesiredState::Idle);
                 ctrl->axes[i].target = 0.0f;
@@ -946,6 +1079,17 @@ namespace hardware_system_handler
                                   "ControlCommand: axis=%zu action=ClosedLoop target=%.3f",
                                   i, static_cast<double>(ctrl->axes[i].target));
         }
+
+        if (ctrl->motion_enable)
+        {
+            ctrl->rs485.throttle_voltage = cmd_if->rs485.throttle_voltage;
+        }
+        else
+        {
+            ctrl->rs485.throttle_voltage = 0.0f;
+        }
+        ctrl->relay.relay_mask = cmd_if->relay.relay_mask;
+
         (void)shmitf_.write_control(desired_control_);
     }
 } // namespace hardware_system_handler

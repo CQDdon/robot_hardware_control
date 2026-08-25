@@ -39,7 +39,8 @@ controller_interface::InterfaceConfiguration VehicleController::command_interfac
   for (const auto & joint : brake_joints_) config.names.push_back(joint + "/position");
   for (const auto & joint : brake_joints_) config.names.push_back(joint + "/idle");
   for (const auto & joint : wheel_joints_) config.names.push_back(joint + "/velocity");
-  config.names.push_back("io/output_mask");
+  config.names.push_back("relay/relay_mask");
+  config.names.push_back("rs485/throttle_voltage");
   return config;
 }
 
@@ -55,7 +56,7 @@ controller_interface::InterfaceConfiguration VehicleController::state_interface_
     config.names.push_back(joint + "/position");
     config.names.push_back(joint + "/velocity");
   }
-  config.names.insert(config.names.end(), {"system/online", "system/fault", "system/motion_allowed", "io/output_mask"});
+  config.names.insert(config.names.end(), {"system/online", "system/fault", "system/motion_allowed", "relay/relay_mask", "rs485/steering_pot_percent"});
   return config;
 }
 
@@ -138,28 +139,30 @@ bool VehicleController::is_timed_out(int64_t received_ns, const rclcpp::Time & t
 }
 
 void VehicleController::set_position_command(double position_percentage, bool force_engaged,
-                                             bool clear_reference_on_release)
+                                             bool /*clear_reference_on_release*/)
 {
   const size_t brake_count = brake_joints_.size();
   const size_t idle_offset = brake_count;
-  const bool release = !force_engaged && position_percentage <= 0.0;
+  if (command_interfaces_.size() < 2 * brake_count || state_interfaces_.size() < 2 * brake_count) return;
+  const double requested_percentage = std::clamp(position_percentage, 0.0, 100.0);
+  const bool release = !force_engaged && requested_percentage <= 0.0;
   if (release) {
-    for (size_t i = 0; i < brake_count; ++i) command_interfaces_[idle_offset + i].set_value(1.0);
-    // A temporary safety fallback must not turn a held +10/+20/+30 command
-    // into another relative move when the controller becomes safe again.
-    // Only the explicit zero-level command (Z) starts a new reference epoch.
-    if (clear_reference_on_release) position_reference_valid_ = false;
+    position_reference_valid_ = false;
+    for (size_t i = 0; i < brake_count; ++i) {
+      command_interfaces_[i].set_value(0.0);
+      command_interfaces_[idle_offset + i].set_value(1.0);
+    }
     return;
   }
 
-  const double requested_percentage = force_engaged ? 100.0 : position_percentage;
+  const double requested_percentage_val = force_engaged ? 100.0 : requested_percentage;
   if (!position_reference_valid_) {
     for (size_t i = 0; i < brake_count; ++i) {
       position_reference_rad_[i] = state_interfaces_[2 * i].get_value();
     }
     position_reference_valid_ = true;
   }
-  const double offset_rad = position_max_offset_turns_ * requested_percentage / 100.0 * 2.0 * M_PI;
+  const double offset_rad = position_max_offset_turns_ * requested_percentage_val / 100.0 * 2.0 * M_PI;
   for (size_t i = 0; i < brake_count; ++i) {
     command_interfaces_[i].set_value(position_reference_rad_[i] + offset_rad);
     command_interfaces_[idle_offset + i].set_value(0.0);
@@ -169,14 +172,14 @@ void VehicleController::set_position_command(double position_percentage, bool fo
 void VehicleController::write_safe_command()
 {
   const size_t brake_count = brake_joints_.size();
+  const size_t wheel_count = wheel_joints_.size();
   const size_t wheel_offset = 2 * brake_count;
-  const size_t io_offset = wheel_offset + wheel_joints_.size();
-  if (command_interfaces_.size() != io_offset + 1 || state_interfaces_.size() < 2 * brake_count) return;
-  // The brake actuator is released by default.  A safe command stops the
-  // wheel and outputs without changing the brake axis out of IDLE.
+  const size_t relay_offset = wheel_offset + wheel_count;
+  const size_t throttle_offset = relay_offset + 1;
+  if (command_interfaces_.size() < throttle_offset + 1 || state_interfaces_.size() < 2 * brake_count) return;
   set_position_command(0.0, false, false);
-  for (size_t i = 0; i < wheel_joints_.size(); ++i) command_interfaces_[wheel_offset + i].set_value(0.0);
-  command_interfaces_[io_offset].set_value(0.0);
+  for (size_t i = 0; i < wheel_count; ++i) command_interfaces_[wheel_offset + i].set_value(0.0);
+  command_interfaces_[throttle_offset].set_value(0.0);
 }
 
 controller_interface::return_type VehicleController::update(const rclcpp::Time & time, const rclcpp::Duration &)
@@ -184,9 +187,10 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
   const size_t brake_count = brake_joints_.size();
   const size_t wheel_count = wheel_joints_.size();
   const size_t wheel_offset = 2 * brake_count;
-  const size_t io_offset = wheel_offset + wheel_count;
+  const size_t relay_offset = wheel_offset + wheel_count;
+  const size_t throttle_offset = relay_offset + 1;
   const size_t system_state_index = 2 * (brake_count + wheel_count);
-  if (command_interfaces_.size() != io_offset + 1 || state_interfaces_.size() != system_state_index + 4) return controller_interface::return_type::ERROR;
+  if (command_interfaces_.size() < throttle_offset + 1 || state_interfaces_.size() < system_state_index + 4) return controller_interface::return_type::ERROR;
   const MotionInput motion = *motion_buffer_.readFromRT();
   const FunctionInput function = *function_buffer_.readFromRT();
   const bool timed_out = is_timed_out(motion.received_ns, time) ||
@@ -200,22 +204,32 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
     (require_function_command_ && !function.received) || timed_out || function_requests_stop ||
     !hardware_motion_allowed || !online || fault;
 
+  // Luôn cập nhật trạng thái Relay từ function command của Client:
+  command_interfaces_[relay_offset].set_value(static_cast<double>(function.io_output_mask));
+
   if (safe) {
-    write_safe_command();
-    // E-stop is an explicit brake request. Timeout/startup/normal stop leave
-    // the independent brake actuator released.
     if (function.received && function.emergency_stop) {
-      set_position_command(100.0, false, false);
+      // E-Stop khẩn cấp: Ép phanh 100% (target = position_reference_rad_ + 30 turns)
+      set_position_command(100.0, true, false);
+      for (size_t i = 0; i < wheel_count; ++i) command_interfaces_[wheel_offset + i].set_value(0.0);
+      command_interfaces_[throttle_offset].set_value(0.0);
+      command_interfaces_[relay_offset].set_value(0.0);
+    } else {
+      write_safe_command();
     }
   } else {
-    set_position_command(motion.brake_percentage, false, true);
-    const double gear_sign = motion.gear == kDrive ? 1.0 : (motion.gear == kReverse ? -1.0 : 0.0);
-    // The wheel and brake are two independent actuators. A brake-position
-    // request must not alter the wheel velocity command.
-    const double wheel_velocity = gear_sign * max_wheel_velocity_rad_s_ *
-      motion.speed_percentage / 100.0;
-    for (size_t i = 0; i < wheel_count; ++i) command_interfaces_[wheel_offset + i].set_value(wheel_velocity);
-    command_interfaces_[io_offset].set_value(static_cast<double>(function.io_output_mask));
+    // 1. Phanh ODrive (Position joint):
+    // Khi brake_percentage <= 0.0 -> trả về IDLE (thả phanh tự do)
+    // Khi brake_percentage > 0.0  -> vào ClosedLoop kéo theo mức %
+    set_position_command(motion.brake_percentage, false, false);
+
+    // 2. Vận tốc đánh lái (Steering velocity) cho motor quay bánh lái ODrive:
+    const double steering_velocity = motion.steering_angle_rad;
+    for (size_t i = 0; i < wheel_count; ++i) command_interfaces_[wheel_offset + i].set_value(steering_velocity);
+
+    // 3. Chân ga (Throttle AO RS485: 0-100% -> 0.0-5.0V):
+    const double throttle_voltage = (std::clamp(static_cast<double>(motion.speed_percentage), 0.0, 100.0) / 100.0) * 5.0;
+    command_interfaces_[throttle_offset].set_value(throttle_voltage);
   }
   publish_states(time, motion, function, timed_out, safe);
   return controller_interface::return_type::OK;
@@ -232,11 +246,12 @@ void VehicleController::publish_states(const rclcpp::Time & time, const MotionIn
   for (size_t i = 0; i < wheel_count; ++i) wheel_velocity += state_interfaces_[wheel_state_offset + 2 * i + 1].get_value();
   wheel_velocity /= static_cast<double>(wheel_count);
   if (motion_rt_pub_ && motion_rt_pub_->trylock()) {
+    const bool has_steering_pot = state_interfaces_.size() >= system_state_index + 5;
+    const float steering_pot_pct = has_steering_pot ? static_cast<float>(state_interfaces_[system_state_index + 4].get_value()) : 0.0F;
+
     auto & out = motion_rt_pub_->msg_;
     out.header.stamp = time;
-    // The legacy message has no brake-position field. Keep this field zero;
-    // brake command state is represented by brake_percentage below.
-    out.steering_angle_rad = 0.0F;
+    out.steering_angle_rad = steering_pot_pct; // Tạm thời gửi trực tiếp % biến trở lên topic
     out.wheel_velocity_rad_s = static_cast<float>(wheel_velocity);
     out.speed_percentage = safe ? 0.0F : static_cast<float>(motion.speed_percentage);
     out.brake_percentage = safe ?

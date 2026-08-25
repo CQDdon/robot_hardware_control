@@ -37,7 +37,7 @@ ament_target_dependencies(${PROJECT_NAME}
 )
 
 # =====================
-# Node wrapper
+# Node wrapper & Test Suite
 # =====================
 add_executable(hsh_node
   src/hsh_node.cpp
@@ -51,6 +51,32 @@ ament_target_dependencies(hsh_node
   rclcpp
 )
 
+add_executable(test_system_behavior
+  src/test_system_behavior.cpp
+)
+
+target_link_libraries(test_system_behavior
+  ${PROJECT_NAME}
+)
+
+ament_target_dependencies(test_system_behavior
+  rclcpp
+  hardware_ipc_common
+)
+
+add_executable(shm_viewer
+  src/shm_viewer.cpp
+)
+
+target_link_libraries(shm_viewer
+  ${PROJECT_NAME}
+)
+
+ament_target_dependencies(shm_viewer
+  rclcpp
+  hardware_ipc_common
+)
+
 # =====================
 # Install
 # =====================
@@ -61,7 +87,7 @@ install(
 )
 
 install(
-  TARGETS hsh_node
+  TARGETS hsh_node test_system_behavior shm_viewer
   DESTINATION lib/${PROJECT_NAME}
 )
 

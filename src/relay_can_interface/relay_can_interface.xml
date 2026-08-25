@@ -1,0 +1,8 @@
+<library path="relay_can_interface">
+  <class
+    name="relay_can_interface/RelayCANSystem"
+    type="relay_can_interface::RelayCANSystem"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>ESP32 CAN Relay ROS2 Control hardware interface</description>
+  </class>
+</library>

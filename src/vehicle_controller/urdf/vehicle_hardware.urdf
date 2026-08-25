@@ -27,4 +27,37 @@
       <param name="id">5</param>
     </joint>
   </ros2_control>
+
+  <!-- RS485 Modbus RTU System -->
+  <ros2_control name="RS485Modbus" type="system">
+    <hardware>
+      <plugin>rs485_modbus_interface/Rs485ModbusSystem</plugin>
+      <param name="port">/dev/ttyUSB0</param>
+      <param name="baud_rate">9600</param>
+      <param name="input_slave_id">1</param>
+      <param name="output_slave_id">2</param>
+      <param name="ao_mode">current</param>
+      <param name="ao_raw_max">20000.0</param>
+    </hardware>
+    <gpio name="rs485">
+      <state_interface name="is_auto_mode"/>
+      <state_interface name="e_stop_voltage"/>
+      <state_interface name="steering_pot_percent"/>
+      <command_interface name="throttle_voltage"/>
+    </gpio>
+  </ros2_control>
+
+  <!-- ESP32 CAN Relay System -->
+  <ros2_control name="RelayCAN" type="system">
+    <hardware>
+      <plugin>relay_can_interface/RelayCANSystem</plugin>
+      <param name="can_port">can0</param>
+      <param name="tx_can_id">0x500</param>
+      <param name="rx_can_id">0x580</param>
+    </hardware>
+    <gpio name="relay">
+      <command_interface name="relay_mask"/>
+      <state_interface name="relay_mask"/>
+    </gpio>
+  </ros2_control>
 </robot>
