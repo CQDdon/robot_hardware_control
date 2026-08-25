@@ -3,8 +3,6 @@
      It deliberately excludes SensorCAN and visual meshes so this bringup has
      no dependency on the legacy swerve packages. -->
 <robot name="vehicle_hardware">
-  <!-- Tạm thời comment 2 axis BLDC ODrive để test RS485 và Relay -->
-  <!--
   <ros2_control name="SwerveDrive" type="system">
     <hardware>
       <plugin>odrive_can_interface/OdriveCANSystem</plugin>
@@ -12,13 +10,16 @@
       <param name="baud_rate">500000</param>
     </hardware>
 
+    <!-- ODrive node 4: position axis. -->
     <joint name="RearRightDriver_Joint">
       <command_interface name="position"/>
+      <!-- 0 = closed loop at position target; 1 = ODrive IDLE. -->
       <command_interface name="idle"/>
       <state_interface name="position"/>
       <state_interface name="velocity"/>
       <param name="id">4</param>
     </joint>
+    <!-- ODrive node 5: velocity axis. -->
     <joint name="RearRightWheel_Joint">
       <command_interface name="velocity"/>
       <state_interface name="position"/>
@@ -26,7 +27,6 @@
       <param name="id">5</param>
     </joint>
   </ros2_control>
-  -->
 
   <!-- RS485 Modbus RTU System -->
   <ros2_control name="RS485Modbus" type="system">
