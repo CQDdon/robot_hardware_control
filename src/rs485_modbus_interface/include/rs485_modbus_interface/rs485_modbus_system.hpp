@@ -57,6 +57,7 @@ private:
   uint16_t ao_register_{0x0007};   // Physical AO8 -> Register 0x0007
   std::string ao_mode_{"voltage"}; // "voltage" (0-5V) hoặc "current" (0-20mA)
   double ao_raw_max_{5000.0};      // 5000.0 cho 0-5V (mV) hoặc 20000.0 cho 0-20mA (uA)
+  double ai_raw_max_{5000.0};      // 5000.0 cho 0-5V (0-5000 count/mV) hoặc 4095.0 cho 12-bit ADC raw
 
   int serial_fd_{-1};
   std::atomic<bool> running_{false};

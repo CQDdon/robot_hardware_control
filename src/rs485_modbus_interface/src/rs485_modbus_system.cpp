@@ -33,11 +33,13 @@ hardware_interface::CallbackReturn Rs485ModbusSystem::on_init(
     ao_mode_ = info.hardware_parameters.at("ao_mode");
   if (info.hardware_parameters.count("ao_raw_max"))
     ao_raw_max_ = std::stod(info.hardware_parameters.at("ao_raw_max"));
+  if (info.hardware_parameters.count("ai_raw_max"))
+    ai_raw_max_ = std::stod(info.hardware_parameters.at("ai_raw_max"));
 
   (void)shmitf_.open(false);
 
-  RCLCPP_INFO(logger_, "Rs485ModbusSystem initialized: port=%s, baud=%d, input_id=%d, output_id=%d, ao_reg=0x%04X, ao_mode=%s, ao_max=%.1f",
-              port_.c_str(), baud_rate_, input_slave_id_, output_slave_id_, ao_register_, ao_mode_.c_str(), ao_raw_max_);
+  RCLCPP_INFO(logger_, "Rs485ModbusSystem initialized: port=%s, baud=%d, input_id=%d, output_id=%d, ao_reg=0x%04X, ao_mode=%s, ao_max=%.1f, ai_max=%.1f",
+              port_.c_str(), baud_rate_, input_slave_id_, output_slave_id_, ao_register_, ao_mode_.c_str(), ao_raw_max_, ai_raw_max_);
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -303,9 +305,10 @@ void Rs485ModbusSystem::modbus_worker_loop()
     // 1. Đọc AI 0x0005..0x0007 từ Input Module (ID = 1)
     if (modbus_read_ai(input_slave_id_, 0x0005, 3, ai_regs))
     {
-      const float v_auto = (static_cast<float>(ai_regs[0]) / 4095.0f) * 5.0f;
-      const float v_estop = (static_cast<float>(ai_regs[1]) / 4095.0f) * 5.0f;
-      const float pot_pct = (static_cast<float>(ai_regs[2]) / 4095.0f) * 100.0f;
+      const float ai_max = (ai_raw_max_ > 0.0) ? static_cast<float>(ai_raw_max_) : 5000.0f;
+      const float v_auto = std::clamp((static_cast<float>(ai_regs[0]) / ai_max) * 5.0f, 0.0f, 5.0f);
+      const float v_estop = std::clamp((static_cast<float>(ai_regs[1]) / ai_max) * 5.0f, 0.0f, 5.0f);
+      const float pot_pct = std::clamp((static_cast<float>(ai_regs[2]) / ai_max) * 100.0f, 0.0f, 100.0f);
 
       // Logic: > 4.7V là Manual, <= 4.7V là Auto
       is_auto_mode_.store(v_auto <= 4.7f, std::memory_order_relaxed);
