@@ -32,7 +32,7 @@
   <ros2_control name="RS485Modbus" type="system">
     <hardware>
       <plugin>rs485_modbus_interface/Rs485ModbusSystem</plugin>
-      <param name="port">/dev/ttyUSB0</param>
+      <param name="port">/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG03R8TU-if00-port0</param>
       <param name="baud_rate">9600</param>
       <param name="input_slave_id">1</param>
       <param name="output_slave_id">2</param>

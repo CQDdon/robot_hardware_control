@@ -42,6 +42,8 @@ public:
 private:
   void modbus_worker_loop();
   bool open_serial();
+  bool open_serial_port(const std::string & port_name);
+  bool auto_probe_and_open();
   void close_serial();
   uint16_t calculate_crc16(const uint8_t * data, size_t length);
   bool modbus_read_ai(uint8_t slave_id, uint16_t start_reg, uint16_t count, uint16_t * out_regs);

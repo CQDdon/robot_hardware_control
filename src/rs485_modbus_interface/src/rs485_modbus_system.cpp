@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include "pluginlib/class_list_macros.hpp"
 
 namespace rs485_modbus_interface
@@ -164,11 +165,11 @@ uint16_t Rs485ModbusSystem::calculate_crc16(const uint8_t * data, size_t length)
   return crc;
 }
 
-bool Rs485ModbusSystem::open_serial()
+bool Rs485ModbusSystem::open_serial_port(const std::string & port_name)
 {
-  if (serial_fd_ >= 0) return true;
+  close_serial();
 
-  serial_fd_ = open(port_.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
+  serial_fd_ = open(port_name.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
   if (serial_fd_ < 0) return false;
 
   struct termios tty{};
@@ -202,6 +203,97 @@ bool Rs485ModbusSystem::open_serial()
   return true;
 }
 
+bool Rs485ModbusSystem::auto_probe_and_open()
+{
+  std::vector<std::string> candidates;
+
+  // 1. Try configured port first if it exists and is not "auto"
+  if (!port_.empty() && port_ != "auto" && std::filesystem::exists(port_))
+  {
+    candidates.push_back(port_);
+  }
+
+  // 2. Discover ports in /dev/serial/by-id/
+  if (std::filesystem::exists("/dev/serial/by-id"))
+  {
+    for (const auto & entry : std::filesystem::directory_iterator("/dev/serial/by-id"))
+    {
+      const std::string path = entry.path().string();
+      // Avoid probing CANable USB-CAN adapters
+      if (path.find("CANable") != std::string::npos || path.find("canable") != std::string::npos)
+      {
+        continue;
+      }
+      candidates.push_back(path);
+    }
+  }
+
+  // 3. Discover /dev/ttyUSB*
+  for (int i = 0; i < 10; ++i)
+  {
+    std::string p = "/dev/ttyUSB" + std::to_string(i);
+    if (std::filesystem::exists(p))
+    {
+      candidates.push_back(p);
+    }
+  }
+
+  // 4. Discover /dev/ttyACM*
+  for (int i = 0; i < 10; ++i)
+  {
+    std::string p = "/dev/ttyACM" + std::to_string(i);
+    if (std::filesystem::exists(p))
+    {
+      candidates.push_back(p);
+    }
+  }
+
+  // Filter unique candidates
+  std::vector<std::string> unique_candidates;
+  for (const auto & p : candidates)
+  {
+    if (std::find(unique_candidates.begin(), unique_candidates.end(), p) == unique_candidates.end())
+    {
+      unique_candidates.push_back(p);
+    }
+  }
+
+  // Probe candidates with Modbus read query
+  uint16_t test_buf[2];
+  for (const auto & cand : unique_candidates)
+  {
+    if (open_serial_port(cand))
+    {
+      if (modbus_read_ai(input_slave_id_, 0x0007, 1, test_buf))
+      {
+        RCLCPP_INFO(logger_, "Auto-detected and connected RS485 Modbus device on: %s", cand.c_str());
+        port_ = cand;
+        return true;
+      }
+      close_serial();
+    }
+  }
+
+  return false;
+}
+
+bool Rs485ModbusSystem::open_serial()
+{
+  if (serial_fd_ >= 0) return true;
+
+  if (port_ == "auto" || !std::filesystem::exists(port_))
+  {
+    return auto_probe_and_open();
+  }
+
+  if (open_serial_port(port_))
+  {
+    return true;
+  }
+
+  return auto_probe_and_open();
+}
+
 void Rs485ModbusSystem::close_serial()
 {
   if (serial_fd_ >= 0)
@@ -229,8 +321,8 @@ bool Rs485ModbusSystem::modbus_read_ai(uint8_t slave_id, uint16_t start_reg, uin
   tcflush(serial_fd_, TCIOFLUSH);
   if (::write(serial_fd_, req, 8) != 8) return false;
 
-  const size_t expected_len = 5 + 2 * count;
-  uint8_t resp[64];
+  const size_t expected_len = 5 + 2 * count; // SlaveID(1) + Func(1) + ByteCount(1) + Data(2*N) + CRC(2)
+  uint8_t resp[32];
   size_t total_read = 0;
 
   while (total_read < expected_len)
@@ -241,12 +333,12 @@ bool Rs485ModbusSystem::modbus_read_ai(uint8_t slave_id, uint16_t start_reg, uin
   }
 
   if (total_read != expected_len) return false;
+  if (resp[0] != slave_id || resp[1] != 0x04 || resp[2] != (2 * count)) return false;
 
   uint16_t resp_crc = static_cast<uint16_t>(resp[expected_len - 2] | (resp[expected_len - 1] << 8));
   if (resp_crc != calculate_crc16(resp, expected_len - 2)) return false;
-  if (resp[0] != slave_id || resp[1] != 0x04 || resp[2] != count * 2) return false;
 
-  for (uint16_t i = 0; i < count; ++i)
+  for (size_t i = 0; i < count; ++i)
   {
     out_regs[i] = static_cast<uint16_t>((resp[3 + 2 * i] << 8) | resp[4 + 2 * i]);
   }
@@ -289,6 +381,7 @@ void Rs485ModbusSystem::modbus_worker_loop()
 {
   uint16_t ai_regs[3] = {0, 0, 0}; // 0x0005, 0x0006, 0x0007
   uint16_t last_ao_val = 0xFFFF;
+  int consecutive_failures = 0;
 
   while (running_.load(std::memory_order_relaxed))
   {
@@ -297,9 +390,10 @@ void Rs485ModbusSystem::modbus_worker_loop()
       (void)open_serial();
       if (serial_fd_ < 0)
       {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
         continue;
       }
+      consecutive_failures = 0;
     }
 
     // 1. Đọc AI 0x0007 (Steering Potentiometer) từ Input Module (ID = 1)
@@ -309,6 +403,17 @@ void Rs485ModbusSystem::modbus_worker_loop()
       const float pot_pct = std::clamp((static_cast<float>(ai_regs[0]) / ai_max) * 100.0f, 0.0f, 100.0f);
 
       steering_pot_percent_.store(pot_pct, std::memory_order_relaxed);
+      consecutive_failures = 0;
+    }
+    else
+    {
+      consecutive_failures++;
+      if (consecutive_failures > 10)
+      {
+        RCLCPP_WARN(logger_, "Lost communication on %s. Re-probing serial ports...", port_.c_str());
+        close_serial();
+        continue;
+      }
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
