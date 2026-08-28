@@ -60,6 +60,9 @@
     <gpio name="relay">
       <command_interface name="relay_mask"/>
       <state_interface name="relay_mask"/>
+      <state_interface name="din_mask"/>
+      <state_interface name="is_auto_mode"/>
+      <state_interface name="is_estop_active"/>
     </gpio>
   </ros2_control>
 </robot>

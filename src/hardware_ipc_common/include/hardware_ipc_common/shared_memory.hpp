@@ -189,6 +189,21 @@ struct Rs485CommandBlock
     }
 };
 
+struct RelayStateBlock
+{
+    uint8_t relay_mask;            // 8-bit mask phản hồi trạng thái relay
+    uint8_t din_mask;              // 8-bit mask đọc từ các cổng DI1..DI8 (raw pin bitmask)
+    uint8_t is_auto_mode;          // 1 = Auto Mode, 0 = Manual Mode (từ DI6)
+    uint8_t is_estop_active;       // 1 = E-Stop Triggered (Dừng khẩn cấp), 0 = Normal (từ DI7)
+    uint32_t reserved_u32_0;
+
+    RelayStateBlock()
+        : relay_mask(0), din_mask(0), is_auto_mode(1), is_estop_active(0),
+          reserved_u32_0(0)
+    {
+    }
+};
+
 struct RelayCommandBlock
 {
     uint8_t relay_mask;            // 8-bit mask điều khiển relay
@@ -211,10 +226,11 @@ struct HwiStateBlock
     uint8_t axis_count;
     AxisFeedbackLite axes[SHM_MAX_AXES];
     Rs485StateBlock rs485;
+    RelayStateBlock relay;
 
     HwiStateBlock()
         : sequence_id(0), timestamp_ns(0), axis_count(0),
-          reserved_u8_1(0), reserved_u16_1(0), rs485()
+          reserved_u8_1(0), reserved_u16_1(0), rs485(), relay()
     {
         for (auto &axis : axes)
         {
@@ -369,6 +385,7 @@ struct HshControlBlock
 
 static_assert(std::is_trivially_copyable<Rs485StateBlock>::value);
 static_assert(std::is_trivially_copyable<Rs485CommandBlock>::value);
+static_assert(std::is_trivially_copyable<RelayStateBlock>::value);
 static_assert(std::is_trivially_copyable<RelayCommandBlock>::value);
 static_assert(std::is_trivially_copyable<HwiCommandIfBlock>::value);
 static_assert(std::is_trivially_copyable<HwiStateBlock>::value);

@@ -640,13 +640,12 @@ namespace hardware_system_handler
             (current_state == FsmState::Ready) ||
             (current_state == FsmState::Running);
 
-        // E-Stop Voltage check: If > 4.7V (floating / switch pressed), immediately trigger EvCriticalError to enter STOP
-        if (have_state_snapshot_ && last_state_.rs485.e_stop_voltage > 4.7f && current_state != FsmState::Stop)
+        // E-Stop check: If DI7 active (is_estop_active != 0), immediately trigger EvCriticalError to enter STOP
+        if (have_state_snapshot_ && last_state_.relay.is_estop_active != 0 && current_state != FsmState::Stop)
         {
             RCLCPP_ERROR_THROTTLE(logger_, *get_clock(), 500,
-                                  "E-Stop switch active detected (%.2f V > 4.7V)! Dispatching EvCriticalError to STOP.",
-                                  last_state_.rs485.e_stop_voltage);
-            log_event("EvCriticalError (E-Stop)");
+                                  "E-Stop switch active detected on CAN Relay DI7! Dispatching EvCriticalError to STOP.");
+            log_event("EvCriticalError (E-Stop DI7)");
             HardwareSystemHandler::dispatch(EvCriticalError{});
             current_state = get_fsm_state();
         }
@@ -825,10 +824,8 @@ namespace hardware_system_handler
             homing_done_.fill(false);
         }
 
-        // Logic gốc:
-        // const bool is_auto = have_state_snapshot_ && (last_state_.rs485.is_auto_mode != 0);
-        // Tạm thời ép luôn Auto Mode (luôn true) để test:
-        const bool is_auto = true;
+        // Mode switch: DI6 on CAN Relay module (1 = Auto, 0 = Manual)
+        const bool is_auto = have_state_snapshot_ && (last_state_.relay.is_auto_mode != 0);
 
         if (current_state == FsmState::Ready)
         {

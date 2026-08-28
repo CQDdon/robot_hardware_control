@@ -69,6 +69,9 @@ std::vector<hardware_interface::StateInterface> RelayCANSystem::export_state_int
 {
   std::vector<hardware_interface::StateInterface> out;
   out.emplace_back("relay", "relay_mask", &state_relay_mask_);
+  out.emplace_back("relay", "din_mask", &state_din_mask_);
+  out.emplace_back("relay", "is_auto_mode", &state_is_auto_mode_);
+  out.emplace_back("relay", "is_estop_active", &state_is_estop_active_);
   return out;
 }
 
@@ -81,7 +84,29 @@ std::vector<hardware_interface::CommandInterface> RelayCANSystem::export_command
 
 hardware_interface::return_type RelayCANSystem::read(const rclcpp::Time &, const rclcpp::Duration &)
 {
-  state_relay_mask_ = static_cast<double>(feedback_relay_mask_.load(std::memory_order_relaxed));
+  const uint8_t fb = feedback_relay_mask_.load(std::memory_order_relaxed);
+  const uint8_t din = din_mask_.load(std::memory_order_relaxed);
+  const bool is_auto = is_auto_mode_.load(std::memory_order_relaxed);
+  const bool is_estop = is_estop_active_.load(std::memory_order_relaxed);
+
+  state_relay_mask_ = static_cast<double>(fb);
+  state_din_mask_ = static_cast<double>(din);
+  state_is_auto_mode_ = is_auto ? 1.0 : 0.0;
+  state_is_estop_active_ = is_estop ? 1.0 : 0.0;
+
+  if (shmitf_.ready())
+  {
+    HwiStateBlock state{};
+    if (shmitf_.read_state(state))
+    {
+      state.relay.relay_mask = fb;
+      state.relay.din_mask = din;
+      state.relay.is_auto_mode = is_auto ? 1 : 0;
+      state.relay.is_estop_active = is_estop ? 1 : 0;
+      (void)shmitf_.write_state(state);
+    }
+  }
+
   return hardware_interface::return_type::OK;
 }
 
@@ -229,6 +254,21 @@ void RelayCANSystem::can_rx_loop()
         if (fb_mask == desired_relay_mask_.load(std::memory_order_relaxed))
         {
           ack_received_.store(true, std::memory_order_relaxed);
+        }
+
+        if (frame.can_dlc >= 5)
+        {
+          const uint8_t din = frame.data[4];
+          din_mask_.store(din, std::memory_order_relaxed);
+
+          // Logic DI:
+          // DI6 (bit 5): 0 = Closed (AUTO), 1 = Open (MANUAL)
+          const bool is_auto = ((din & (1 << 5)) == 0);
+          is_auto_mode_.store(is_auto, std::memory_order_relaxed);
+
+          // DI7 (bit 6): 1 = Open/Pressed/Fault (E-Stop Triggered), 0 = Closed (Normal)
+          const bool is_estop = ((din & (1 << 6)) != 0);
+          is_estop_active_.store(is_estop, std::memory_order_relaxed);
         }
       }
     }

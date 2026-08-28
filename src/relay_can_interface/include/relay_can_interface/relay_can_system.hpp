@@ -60,6 +60,9 @@ private:
   uint8_t sequence_{0};
   std::atomic<uint8_t> desired_relay_mask_{0};
   std::atomic<uint8_t> feedback_relay_mask_{0xFF};
+  std::atomic<uint8_t> din_mask_{0xFF};
+  std::atomic<bool> is_auto_mode_{true};
+  std::atomic<bool> is_estop_active_{false};
   std::atomic<bool> ack_received_{false};
 
   std::chrono::steady_clock::time_point last_send_time_{std::chrono::steady_clock::time_point::min()};
@@ -69,6 +72,9 @@ private:
 
   double cmd_relay_mask_{0.0};
   double state_relay_mask_{0.0};
+  double state_din_mask_{0.0};
+  double state_is_auto_mode_{1.0};
+  double state_is_estop_active_{0.0};
 
   hardware_ipc_common::SharedMemoryInterface shmitf_;
 };

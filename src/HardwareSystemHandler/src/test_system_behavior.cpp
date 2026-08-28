@@ -31,8 +31,8 @@ int main(int argc, char **argv)
     sim_state.axes[0].odrive_state_summary = AxisStateSummary::Idle;
     sim_state.axes[1].online = 1;
     sim_state.axes[1].odrive_state_summary = AxisStateSummary::Idle;
-    sim_state.rs485.is_auto_mode = 1;
-    sim_state.rs485.e_stop_voltage = 0.5f; // An toàn (<= 4.7V)
+    sim_state.relay.is_auto_mode = 1;
+    sim_state.relay.is_estop_active = 0; // Normal
     sim_state.rs485.steering_pot_percent = 50.0f;
 
     HwiCommandIfBlock sim_cmd_if{};
@@ -95,10 +95,10 @@ int main(int argc, char **argv)
     assert(std::abs(ctrl.rs485.throttle_voltage - 3.5f) < 0.1f && "FAILED: Throttle should pass through in AUTO mode");
     std::cout << "  [PASS] Auto Mode Bringup & Motion Permitted OK!\n\n";
 
-    std::cout << "[TEST 2] Testing Auto -> Manual mode switch...\n";
+    std::cout << "[TEST 2] Testing Auto -> Manual mode switch (DI6)...\n";
     {
         std::lock_guard<std::mutex> lock(data_mutex);
-        sim_state.rs485.is_auto_mode = 0; // Chuyển sang MANUAL
+        sim_state.relay.is_auto_mode = 0; // Chuyển sang MANUAL (DI6 Open)
     }
     std::this_thread::sleep_for(300ms);
 
@@ -109,10 +109,10 @@ int main(int argc, char **argv)
     assert(ctrl.rs485.throttle_voltage == 0.0f && "FAILED: throttle_voltage must be clamped to 0V in MANUAL mode");
     std::cout << "  [PASS] Manual Mode Safety Interlock OK!\n\n";
 
-    std::cout << "[TEST 3] Testing Manual -> Auto restoration...\n";
+    std::cout << "[TEST 3] Testing Manual -> Auto restoration (DI6)...\n";
     {
         std::lock_guard<std::mutex> lock(data_mutex);
-        sim_state.rs485.is_auto_mode = 1; // Chuyển lại AUTO
+        sim_state.relay.is_auto_mode = 1; // Chuyển lại AUTO (DI6 Closed)
     }
     std::this_thread::sleep_for(300ms);
 
@@ -123,10 +123,10 @@ int main(int argc, char **argv)
     assert(std::abs(ctrl.rs485.throttle_voltage - 3.5f) < 0.1f && "FAILED: throttle_voltage should be restored");
     std::cout << "  [PASS] Auto Restoration OK!\n\n";
 
-    std::cout << "[TEST 4] Testing E-Stop active (> 4.7V) protection...\n";
+    std::cout << "[TEST 4] Testing E-Stop active on CAN Relay DI7 protection...\n";
     {
         std::lock_guard<std::mutex> lock(data_mutex);
-        sim_state.rs485.e_stop_voltage = 4.9f; // Kích hoạt E-Stop khẩn cấp (> 4.7V)
+        sim_state.relay.is_estop_active = 1; // Kích hoạt E-Stop khẩn cấp (DI7 Active)
     }
     std::this_thread::sleep_for(400ms);
 
@@ -148,7 +148,7 @@ int main(int argc, char **argv)
     std::cout << "[TEST 5] Testing E-Stop Latching (Cannot recover automatically without reset)...\n";
     {
         std::lock_guard<std::mutex> lock(data_mutex);
-        sim_state.rs485.e_stop_voltage = 0.5f; // Điện áp hồi phục về an toàn nhưng FSM phải chốt ở STOP
+        sim_state.relay.is_estop_active = 0; // DI7 hồi phục về bình thường nhưng FSM phải chốt ở STOP
     }
     std::this_thread::sleep_for(300ms);
 

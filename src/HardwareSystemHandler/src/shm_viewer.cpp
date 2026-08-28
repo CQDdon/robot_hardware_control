@@ -82,17 +82,24 @@ void print_dashboard(const HwiStateBlock& state, const HwiCommandIfBlock& cmd_if
               << "\n\n";
 
     // RS485 & Relay Peripherals
-    const bool is_auto = (state.rs485.is_auto_mode != 0);
-    const float estop_v = state.rs485.e_stop_voltage;
-    const bool estop_triggered = (estop_v > 4.7f);
+    const bool is_auto = (state.relay.is_auto_mode != 0);
+    const bool estop_triggered = (state.relay.is_estop_active != 0);
 
     std::cout << BOLD << MAGENTA << " [RS485 Modbus & CAN Relay Peripherals] " << RESET << "\n";
-    std::cout << "  * Mode Switch (AI 0x0005)    : " << (is_auto ? GREEN "AUTO (<= 4.7V)" RESET : YELLOW "MANUAL (> 4.7V)" RESET) << "\n";
-    std::cout << "  * E-Stop Switch (AI 0x0006)  : " << (estop_triggered ? RED : GREEN)
-              << std::fixed << std::setprecision(2) << estop_v << " V " << RESET
-              << (estop_triggered ? RED "[STOPPED / PRESSED]" RESET : GREEN "[NORMAL / RELEASED]" RESET) << "\n";
-    std::cout << "  * Steering Pot (AI 0x0007)   : " << CYAN << std::fixed << std::setprecision(1) << state.rs485.steering_pot_percent << " %" << RESET << "\n";
-    std::cout << "  * Throttle Output (AO8 / 0x0007): " << CYAN << std::fixed << std::setprecision(2) << ctrl.rs485.throttle_voltage << " V" << RESET << "\n";
+    std::cout << "  * Mode Switch (CAN Relay DI6): " << (is_auto ? GREEN "AUTO [CLOSED]" RESET : YELLOW "MANUAL [OPEN]" RESET) << "\n";
+    std::cout << "  * E-Stop Switch (CAN Relay DI7): "
+              << (estop_triggered ? RED "[STOPPED / PRESSED / OPEN]" RESET : GREEN "[NORMAL / RELEASED / CLOSED]" RESET) << "\n";
+    std::cout << "  * Digital Inputs (DI1..DI8)  : " << YELLOW << "0x"
+              << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(state.relay.din_mask) << std::dec << std::setfill(' ')
+              << " (Bits: [";
+    for (int b = 7; b >= 0; --b) {
+        if ((state.relay.din_mask >> b) & 1) std::cout << YELLOW << "1" << RESET;
+        else std::cout << "0";
+        if (b > 0) std::cout << " ";
+    }
+    std::cout << "])" << RESET << "\n";
+    std::cout << "  * Steering Pot (RS485 AI8 / 0x0007): " << CYAN << std::fixed << std::setprecision(1) << state.rs485.steering_pot_percent << " %" << RESET << "\n";
+    std::cout << "  * Throttle Output (RS485 AO8 / 0x0007): " << CYAN << std::fixed << std::setprecision(2) << ctrl.rs485.throttle_voltage << " V" << RESET << "\n";
     
     // Relay Mask in binary & hex
     std::cout << "  * ESP32 Relay Mask (ID 0x500): " << YELLOW << "0x" 
