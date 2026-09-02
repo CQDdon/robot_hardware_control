@@ -30,6 +30,8 @@ public:
   controller_interface::CallbackReturn on_deactivate(const rclcpp_lifecycle::State & previous_state) override;
 
 private:
+  friend class VehicleControllerTest;
+
   struct MotionInput
   {
     bool received{false};
@@ -58,12 +60,32 @@ private:
   void publish_states(const rclcpp::Time & time, const MotionInput & motion,
                       const FunctionInput & function, bool timed_out, bool safe);
 
+  enum class DriveSequenceState
+  {
+    DISENGAGED,
+    DIRECTION_ENGAGING,
+    MAIN_ENGAGING,
+    RUNNING,
+    DISENGAGING_FOR_REVERSE
+  };
+
   std::vector<std::string> brake_joints_;
   std::vector<std::string> wheel_joints_;
   double position_max_offset_turns_{30.0};
   double max_wheel_velocity_rad_s_{20.0};
   int command_timeout_ms_{250};
   bool require_function_command_{true};
+
+  int relay_direction_delay_ms_{100};
+  int relay_main_delay_ms_{100};
+  int relay_deadtime_ms_{100};
+
+  DriveSequenceState drive_seq_state_{DriveSequenceState::DISENGAGED};
+  uint8_t active_direction_gear_{0};
+  rclcpp::Time state_start_time_{0, 0, RCL_ROS_TIME};
+
+  std::vector<double> position_reference_rad_;
+  bool position_reference_valid_{false};
 
   realtime_tools::RealtimeBuffer<MotionInput> motion_buffer_;
   realtime_tools::RealtimeBuffer<FunctionInput> function_buffer_;
@@ -75,5 +97,4 @@ private:
   std::shared_ptr<realtime_tools::RealtimePublisher<vehicle_msgs::msg::VehicleSystemState>> system_rt_pub_;
 };
 }  // namespace vehicle_controller
-  std::vector<double> position_reference_rad_;
-  bool position_reference_valid_{false};
+

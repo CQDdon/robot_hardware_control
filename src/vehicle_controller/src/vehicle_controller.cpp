@@ -14,6 +14,12 @@ namespace
 constexpr uint8_t kNeutral = vehicle_msgs::msg::VehicleMotionCommand::GEAR_NEUTRAL;
 constexpr uint8_t kDrive = vehicle_msgs::msg::VehicleMotionCommand::GEAR_DRIVE;
 constexpr uint8_t kReverse = vehicle_msgs::msg::VehicleMotionCommand::GEAR_REVERSE;
+
+constexpr uint8_t kRelay6Forward = 1 << 5;  // 0x20: Relay 6 Forward
+constexpr uint8_t kRelay7Reverse = 1 << 6;  // 0x40: Relay 7 Reverse
+constexpr uint8_t kRelay8Main    = 1 << 7;  // 0x80: Relay 8 Main/Power
+constexpr uint8_t kDriveRelayMask = kRelay6Forward | kRelay7Reverse | kRelay8Main;  // 0xE0
+constexpr uint8_t kAuxRelayMask = static_cast<uint8_t>(~kDriveRelayMask);  // 0x1F: Relays 1..5 preserved
 }  // namespace
 
 controller_interface::CallbackReturn VehicleController::on_init()
@@ -25,6 +31,9 @@ controller_interface::CallbackReturn VehicleController::on_init()
     auto_declare<double>("max_wheel_velocity_rad_s", max_wheel_velocity_rad_s_);
     auto_declare<int>("command_timeout_ms", command_timeout_ms_);
     auto_declare<bool>("require_function_command", require_function_command_);
+    auto_declare<int>("relay_direction_delay_ms", relay_direction_delay_ms_);
+    auto_declare<int>("relay_main_delay_ms", relay_main_delay_ms_);
+    auto_declare<int>("relay_deadtime_ms", relay_deadtime_ms_);
   } catch (const std::exception & e) {
     RCLCPP_ERROR(get_node()->get_logger(), "Cannot declare parameters: %s", e.what());
     return controller_interface::CallbackReturn::ERROR;
@@ -68,11 +77,15 @@ controller_interface::CallbackReturn VehicleController::on_configure(const rclcp
   max_wheel_velocity_rad_s_ = get_node()->get_parameter("max_wheel_velocity_rad_s").as_double();
   command_timeout_ms_ = get_node()->get_parameter("command_timeout_ms").as_int();
   require_function_command_ = get_node()->get_parameter("require_function_command").as_bool();
+  relay_direction_delay_ms_ = get_node()->get_parameter("relay_direction_delay_ms").as_int();
+  relay_main_delay_ms_ = get_node()->get_parameter("relay_main_delay_ms").as_int();
+  relay_deadtime_ms_ = get_node()->get_parameter("relay_deadtime_ms").as_int();
   if (brake_joints_.empty() || wheel_joints_.empty() || !std::isfinite(position_max_offset_turns_) ||
       position_max_offset_turns_ <= 0.0 ||
       !std::isfinite(max_wheel_velocity_rad_s_) ||
-      max_wheel_velocity_rad_s_ <= 0.0 || command_timeout_ms_ <= 0) {
-    RCLCPP_ERROR(get_node()->get_logger(), "Invalid brake/wheel controller parameters");
+      max_wheel_velocity_rad_s_ <= 0.0 || command_timeout_ms_ <= 0 ||
+      relay_direction_delay_ms_ < 0 || relay_main_delay_ms_ < 0 || relay_deadtime_ms_ < 0) {
+    RCLCPP_ERROR(get_node()->get_logger(), "Invalid brake/wheel/relay controller parameters");
     return controller_interface::CallbackReturn::ERROR;
   }
 
@@ -90,17 +103,26 @@ controller_interface::CallbackReturn VehicleController::on_configure(const rclcp
   function_buffer_.initRT(FunctionInput{});
   position_reference_rad_.assign(brake_joints_.size(), 0.0);
   position_reference_valid_ = false;
+  drive_seq_state_ = DriveSequenceState::DISENGAGED;
+  active_direction_gear_ = kNeutral;
+  state_start_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
 controller_interface::CallbackReturn VehicleController::on_activate(const rclcpp_lifecycle::State &)
 {
+  drive_seq_state_ = DriveSequenceState::DISENGAGED;
+  active_direction_gear_ = kNeutral;
+  state_start_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   write_safe_command();
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
 controller_interface::CallbackReturn VehicleController::on_deactivate(const rclcpp_lifecycle::State &)
 {
+  drive_seq_state_ = DriveSequenceState::DISENGAGED;
+  active_direction_gear_ = kNeutral;
+  state_start_time_ = rclcpp::Time(0, 0, RCL_ROS_TIME);
   write_safe_command();
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -180,6 +202,11 @@ void VehicleController::write_safe_command()
   set_position_command(0.0, false, false);
   for (size_t i = 0; i < wheel_count; ++i) command_interfaces_[wheel_offset + i].set_value(0.0);
   command_interfaces_[throttle_offset].set_value(0.0);
+
+  // Preserve auxiliary relays (bits 0..4) while clearing drive relays (bits 5..7)
+  const double current_relay = command_interfaces_[relay_offset].get_value();
+  const uint8_t aux_mask = static_cast<uint8_t>(std::clamp(std::lround(current_relay), 0L, 255L)) & kAuxRelayMask;
+  command_interfaces_[relay_offset].set_value(static_cast<double>(aux_mask));
 }
 
 controller_interface::return_type VehicleController::update(const rclcpp::Time & time, const rclcpp::Duration &)
@@ -204,10 +231,16 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
     (require_function_command_ && !function.received) || timed_out || function_requests_stop ||
     !hardware_motion_allowed || !online || fault;
 
-  // Luôn cập nhật trạng thái Relay từ function command của Client:
-  command_interfaces_[relay_offset].set_value(static_cast<double>(function.io_output_mask));
+  const uint8_t aux_relay_mask = function.io_output_mask & kAuxRelayMask;
+  uint8_t drive_relay_bits = 0;
+  double throttle_voltage = 0.0;
 
   if (safe) {
+    drive_seq_state_ = DriveSequenceState::DISENGAGED;
+    active_direction_gear_ = kNeutral;
+    drive_relay_bits = 0;
+    throttle_voltage = 0.0;
+
     if (function.received && function.emergency_stop) {
       // E-Stop khẩn cấp: Ép phanh 100% (target = position_reference_rad_ + 30 turns)
       set_position_command(100.0, true, false);
@@ -227,8 +260,103 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
     const double steering_velocity = motion.steering_angle_rad;
     for (size_t i = 0; i < wheel_count; ++i) command_interfaces_[wheel_offset + i].set_value(steering_velocity);
 
-    // 3. Chân ga (Throttle AO RS485: 0-100% -> 0.0-5.0V):
-    const double throttle_voltage = (std::clamp(static_cast<double>(motion.speed_percentage), 0.0, 100.0) / 100.0) * 5.0;
+    // 3. Logic tuần tự hóa Relay truyền động (Relay 6/7 -> Relay 8 -> Nạp ga):
+    const uint8_t requested_gear = motion.gear;
+    const int64_t dir_delay_ns = static_cast<int64_t>(relay_direction_delay_ms_) * 1000000LL;
+    const int64_t main_delay_ns = static_cast<int64_t>(relay_main_delay_ms_) * 1000000LL;
+    const int64_t deadtime_ns = static_cast<int64_t>(relay_deadtime_ms_) * 1000000LL;
+
+    auto get_dir_bit = [](uint8_t gear) -> uint8_t {
+      if (gear == kDrive) return kRelay6Forward;
+      if (gear == kReverse) return kRelay7Reverse;
+      return 0;
+    };
+
+    switch (drive_seq_state_) {
+      case DriveSequenceState::DISENGAGED:
+        drive_relay_bits = 0;
+        throttle_voltage = 0.0;
+        if (requested_gear == kDrive || requested_gear == kReverse) {
+          active_direction_gear_ = requested_gear;
+          drive_seq_state_ = DriveSequenceState::DIRECTION_ENGAGING;
+          state_start_time_ = time;
+          drive_relay_bits = get_dir_bit(active_direction_gear_);
+        }
+        break;
+
+      case DriveSequenceState::DIRECTION_ENGAGING:
+        throttle_voltage = 0.0;
+        if (requested_gear == kNeutral) {
+          drive_seq_state_ = DriveSequenceState::DISENGAGED;
+          active_direction_gear_ = kNeutral;
+          drive_relay_bits = 0;
+        } else if (requested_gear != active_direction_gear_) {
+          drive_seq_state_ = DriveSequenceState::DISENGAGING_FOR_REVERSE;
+          state_start_time_ = time;
+          drive_relay_bits = 0;
+        } else {
+          drive_relay_bits = get_dir_bit(active_direction_gear_);
+          if ((time.nanoseconds() - state_start_time_.nanoseconds()) >= dir_delay_ns) {
+            drive_seq_state_ = DriveSequenceState::MAIN_ENGAGING;
+            state_start_time_ = time;
+            drive_relay_bits |= kRelay8Main;
+          }
+        }
+        break;
+
+      case DriveSequenceState::MAIN_ENGAGING:
+        throttle_voltage = 0.0;
+        if (requested_gear == kNeutral) {
+          drive_seq_state_ = DriveSequenceState::DISENGAGED;
+          active_direction_gear_ = kNeutral;
+          drive_relay_bits = 0;
+        } else if (requested_gear != active_direction_gear_) {
+          drive_seq_state_ = DriveSequenceState::DISENGAGING_FOR_REVERSE;
+          state_start_time_ = time;
+          drive_relay_bits = 0;
+        } else {
+          drive_relay_bits = get_dir_bit(active_direction_gear_) | kRelay8Main;
+          if ((time.nanoseconds() - state_start_time_.nanoseconds()) >= main_delay_ns) {
+            drive_seq_state_ = DriveSequenceState::RUNNING;
+            throttle_voltage = (std::clamp(static_cast<double>(motion.speed_percentage), 0.0, 100.0) / 100.0) * 5.0;
+          }
+        }
+        break;
+
+      case DriveSequenceState::RUNNING:
+        if (requested_gear == kNeutral) {
+          drive_seq_state_ = DriveSequenceState::DISENGAGED;
+          active_direction_gear_ = kNeutral;
+          drive_relay_bits = 0;
+          throttle_voltage = 0.0;
+        } else if (requested_gear != active_direction_gear_) {
+          drive_seq_state_ = DriveSequenceState::DISENGAGING_FOR_REVERSE;
+          state_start_time_ = time;
+          drive_relay_bits = 0;
+          throttle_voltage = 0.0;
+        } else {
+          drive_relay_bits = get_dir_bit(active_direction_gear_) | kRelay8Main;
+          throttle_voltage = (std::clamp(static_cast<double>(motion.speed_percentage), 0.0, 100.0) / 100.0) * 5.0;
+        }
+        break;
+
+      case DriveSequenceState::DISENGAGING_FOR_REVERSE:
+        drive_relay_bits = 0;
+        throttle_voltage = 0.0;
+        if (requested_gear == kNeutral) {
+          drive_seq_state_ = DriveSequenceState::DISENGAGED;
+          active_direction_gear_ = kNeutral;
+        } else if ((time.nanoseconds() - state_start_time_.nanoseconds()) >= deadtime_ns) {
+          active_direction_gear_ = requested_gear;
+          drive_seq_state_ = DriveSequenceState::DIRECTION_ENGAGING;
+          state_start_time_ = time;
+          drive_relay_bits = get_dir_bit(active_direction_gear_);
+        }
+        break;
+    }
+
+    const uint8_t final_relay_mask = aux_relay_mask | drive_relay_bits;
+    command_interfaces_[relay_offset].set_value(static_cast<double>(final_relay_mask));
     command_interfaces_[throttle_offset].set_value(throttle_voltage);
   }
   publish_states(time, motion, function, timed_out, safe);
@@ -253,7 +381,8 @@ void VehicleController::publish_states(const rclcpp::Time & time, const MotionIn
     out.header.stamp = time;
     out.steering_angle_rad = steering_pot_pct; // Tạm thời gửi trực tiếp % biến trở lên topic
     out.wheel_velocity_rad_s = static_cast<float>(wheel_velocity);
-    out.speed_percentage = safe ? 0.0F : static_cast<float>(motion.speed_percentage);
+    const bool throttle_active = !safe && (drive_seq_state_ == DriveSequenceState::RUNNING);
+    out.speed_percentage = throttle_active ? static_cast<float>(motion.speed_percentage) : 0.0F;
     out.brake_percentage = safe ?
       (function.emergency_stop ? 100.0F : 0.0F) : static_cast<float>(motion.brake_percentage);
     out.gear = safe ? kNeutral : motion.gear;

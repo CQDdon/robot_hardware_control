@@ -15,3 +15,8 @@ vehicle_controller:
     command_timeout_ms: 250
     # Bench test: motion_cmd alone drives the axes.  Production should set true.
     require_function_command: false
+    # Drive relay sequencing delays (ms): Relay 6/7 -> Relay 8 -> Throttle
+    relay_direction_delay_ms: 100
+    relay_main_delay_ms: 100
+    relay_deadtime_ms: 100
+

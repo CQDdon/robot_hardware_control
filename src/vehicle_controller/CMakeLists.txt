@@ -28,4 +28,17 @@ install(DIRECTORY include/ DESTINATION include)
 install(FILES vehicle_controller.xml DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY config launch urdf DESTINATION share/${PROJECT_NAME})
 ament_export_dependencies(controller_interface hardware_interface pluginlib rclcpp realtime_tools vehicle_msgs)
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_vehicle_controller_sequence test/test_vehicle_controller_sequence.cpp)
+  target_include_directories(test_vehicle_controller_sequence PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+  target_link_libraries(test_vehicle_controller_sequence
+    ${PROJECT_NAME}
+    ${vehicle_msgs_LIBRARIES__rosidl_typesupport_fastrtps_cpp})
+  ament_target_dependencies(test_vehicle_controller_sequence
+    controller_interface hardware_interface rclcpp realtime_tools vehicle_msgs)
+endif()
+
 ament_package()
