@@ -6,6 +6,13 @@
 #include <csignal>
 #include <atomic>
 #include <algorithm>
+#include <cstring>
+#include <unistd.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <linux/can.h>
+#include <linux/can/raw.h>
 #include "hardware_ipc_common/shared_memory.hpp"
 
 using namespace hardware_ipc_common;
@@ -23,9 +30,110 @@ using namespace hardware_ipc_common;
 
 std::atomic<bool> g_running{true};
 
+// CAN1 Telemetry state (Battery 0x753 & Speed 0x751)
+std::atomic<bool> g_can1_running{true};
+std::atomic<bool> g_can1_socket_ok{false};
+std::atomic<float> g_can1_battery_v{0.0f};
+std::atomic<uint32_t> g_can1_battery_raw{0};
+std::atomic<int64_t> g_can1_battery_last_ns{0};
+
+std::atomic<float> g_can1_speed_kmh{0.0f};
+std::atomic<float> g_can1_speed_mps{0.0f};
+std::atomic<uint32_t> g_can1_speed_raw{0};
+std::atomic<int64_t> g_can1_speed_last_ns{0};
+
+void can1_rx_worker()
+{
+    while (g_can1_running)
+    {
+        int s = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+        if (s < 0)
+        {
+            g_can1_socket_ok = false;
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
+
+        struct ifreq ifr;
+        std::memset(&ifr, 0, sizeof(ifr));
+        std::strncpy(ifr.ifr_name, "can1", IFNAMSIZ - 1);
+        if (ioctl(s, SIOCGIFINDEX, &ifr) < 0)
+        {
+            close(s);
+            g_can1_socket_ok = false;
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
+
+        struct sockaddr_can addr{};
+        addr.can_family = AF_CAN;
+        addr.can_ifindex = ifr.ifr_ifindex;
+
+        struct can_filter rfilter[2];
+        rfilter[0].can_id = 0x751;
+        rfilter[0].can_mask = CAN_SFF_MASK;
+        rfilter[1].can_id = 0x753;
+        rfilter[1].can_mask = CAN_SFF_MASK;
+        setsockopt(s, SOL_CAN_RAW, CAN_RAW_FILTER, &rfilter, sizeof(rfilter));
+
+        struct timeval tv{};
+        tv.tv_sec = 0;
+        tv.tv_usec = 250000;
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        if (bind(s, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0)
+        {
+            close(s);
+            g_can1_socket_ok = false;
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
+
+        g_can1_socket_ok = true;
+
+        while (g_can1_running)
+        {
+            struct can_frame frame{};
+            int nbytes = read(s, &frame, sizeof(struct can_frame));
+            if (nbytes < 0)
+            {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                break;
+            }
+
+            const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+
+            if (frame.can_id == 0x753 && frame.can_dlc >= 8)
+            {
+                uint32_t raw_bat = 0;
+                std::memcpy(&raw_bat, &frame.data[4], sizeof(uint32_t));
+                g_can1_battery_raw.store(raw_bat, std::memory_order_relaxed);
+                g_can1_battery_v.store(static_cast<float>(raw_bat) / 100.0f, std::memory_order_relaxed);
+                g_can1_battery_last_ns.store(now_ns, std::memory_order_relaxed);
+            }
+            else if (frame.can_id == 0x751 && frame.can_dlc >= 4)
+            {
+                uint32_t raw_spd = 0;
+                std::memcpy(&raw_spd, &frame.data[0], sizeof(uint32_t));
+                uint32_t clamped = (raw_spd > 4095) ? 4095 : raw_spd;
+                float kmh = (static_cast<float>(clamped) / 4095.0f) * 25.0f;
+                g_can1_speed_raw.store(raw_spd, std::memory_order_relaxed);
+                g_can1_speed_kmh.store(kmh, std::memory_order_relaxed);
+                g_can1_speed_mps.store(kmh / 3.6f, std::memory_order_relaxed);
+                g_can1_speed_last_ns.store(now_ns, std::memory_order_relaxed);
+            }
+        }
+
+        close(s);
+        g_can1_socket_ok = false;
+    }
+}
+
 void sigint_handler(int)
 {
     g_running = false;
+    g_can1_running = false;
 }
 
 const char* axis_state_to_string(AxisStateSummary state)
@@ -81,6 +189,44 @@ void print_dashboard(const HwiStateBlock& state, const HwiCommandIfBlock& cmd_if
               << " | Axes: " << static_cast<int>(state.axis_count) 
               << " | FSM Motion Enable: " << (ctrl.motion_enable ? GREEN "YES (ON)" RESET : RED "NO (LOCKED)" RESET)
               << "\n\n";
+
+    // Vehicle CAN1 Telemetry (Battery 0x753 & Speed 0x751)
+    const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+
+    const int64_t bat_last_ns = g_can1_battery_last_ns.load(std::memory_order_relaxed);
+    const int64_t spd_last_ns = g_can1_speed_last_ns.load(std::memory_order_relaxed);
+    const double bat_age_ms = (bat_last_ns > 0) ? (now_ns - bat_last_ns) / 1000000.0 : 99999.0;
+    const double spd_age_ms = (spd_last_ns > 0) ? (now_ns - spd_last_ns) / 1000000.0 : 99999.0;
+
+    const float bat_v = g_can1_battery_v.load(std::memory_order_relaxed);
+    const uint32_t bat_raw = g_can1_battery_raw.load(std::memory_order_relaxed);
+    const float spd_kmh = g_can1_speed_kmh.load(std::memory_order_relaxed);
+    const float spd_mps = g_can1_speed_mps.load(std::memory_order_relaxed);
+    const uint32_t spd_raw = g_can1_speed_raw.load(std::memory_order_relaxed);
+
+    std::cout << BOLD << GREEN << " [Vehicle CAN1 Telemetry (Battery & Speed)] " << RESET << "\n";
+    if (bat_age_ms < 1500.0) {
+        const char* bat_col = (bat_v >= 46.0f) ? GREEN : ((bat_v >= 42.0f) ? YELLOW : RED);
+        std::cout << "  * Battery Voltage (ID 0x753)  : " << bat_col << BOLD << std::fixed << std::setprecision(2)
+                  << bat_v << " V" << RESET
+                  << " (raw: " << bat_raw << ", " << std::fixed << std::setprecision(0) << bat_age_ms << " ms ago)" << "\n";
+    } else {
+        std::cout << "  * Battery Voltage (ID 0x753)  : " << RED << "[NO SIGNAL / TIMEOUT]" << RESET;
+        if (!g_can1_socket_ok) std::cout << YELLOW << " (can1 interface offline/down)" << RESET;
+        std::cout << "\n";
+    }
+
+    if (spd_age_ms < 1500.0) {
+        std::cout << "  * Vehicle Speed   (ID 0x751)  : " << CYAN << BOLD << std::fixed << std::setprecision(2)
+                  << spd_kmh << " km/h" << RESET << " (" << std::fixed << std::setprecision(2) << spd_mps << " m/s)"
+                  << " (raw: " << spd_raw << "/4095, " << std::fixed << std::setprecision(0) << spd_age_ms << " ms ago)" << "\n";
+    } else {
+        std::cout << "  * Vehicle Speed   (ID 0x751)  : " << RED << "[NO SIGNAL / TIMEOUT]" << RESET;
+        if (!g_can1_socket_ok) std::cout << YELLOW << " (can1 interface offline/down)" << RESET;
+        std::cout << "\n";
+    }
+    std::cout << "\n";
 
     // RS485 & Relay Peripherals
     const bool is_auto = (state.relay.is_auto_mode != 0);
@@ -178,11 +324,15 @@ int main(int argc, char** argv)
 
     signal(SIGINT, sigint_handler);
 
+    std::thread can1_thread(can1_rx_worker);
+
     SharedMemoryInterface shmitf;
     if (!shmitf.open(false))
     {
         std::cerr << RED << "✗ Failed to open shared memory!" << RESET << std::endl;
         std::cerr << "  Make sure ros2_control_node (vehicle_hardware_bringup) is running." << std::endl;
+        g_can1_running = false;
+        if (can1_thread.joinable()) can1_thread.join();
         return 1;
     }
 
@@ -204,6 +354,12 @@ int main(int argc, char** argv)
 
         if (run_once) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 10Hz live update
+    }
+
+    g_can1_running = false;
+    if (can1_thread.joinable())
+    {
+        can1_thread.join();
     }
 
     return 0;
