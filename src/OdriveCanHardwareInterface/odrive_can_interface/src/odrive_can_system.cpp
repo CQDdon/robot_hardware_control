@@ -344,13 +344,6 @@ namespace odrive_can_interface
   hardware_interface::return_type
   OdriveCANSystem::write(const rclcpp::Time &time, const rclcpp::Duration &)
   {
-    HwiCommandIfBlock cmd_if{};
-    if (!shmitf_.read_cmd_if(cmd_if))
-    {
-      return hardware_interface::return_type::ERROR;
-    }
-
-    HwiCommandIfBlock out = cmd_if;
     HwiCommandIfBlock out{};
     (void)shmitf_.read_cmd_if(out);
     out.axis_count = static_cast<uint8_t>(

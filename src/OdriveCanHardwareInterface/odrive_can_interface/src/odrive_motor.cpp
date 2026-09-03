@@ -104,7 +104,6 @@ bool OdriveMotor::setTarget(float value)
         data = floatToBytes(value);
         break;
     }
-    return sendCommand(cmd_id, floatToBytes(value));
     return sendCommand(cmd_id, data);
 }
 

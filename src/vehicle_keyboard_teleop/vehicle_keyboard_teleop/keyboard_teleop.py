@@ -78,21 +78,17 @@ class VehicleKeyboardTeleop(Node):
     def _handle_key(self, key):
         key = key.lower()
         if key == 'w':
-            self.throttle = self._clamp(self.throttle + self.throttle_step, 0.0, self.max_throttle)
             if not self.emergency_stop:
                 self.motion_enable = True
                 self.throttle = self._clamp(self.throttle + self.throttle_step, 0.0, self.max_throttle)
         elif key == 's':
-            self.throttle = self._clamp(self.throttle - self.throttle_step, 0.0, self.max_throttle)
             if not self.emergency_stop:
                 self.throttle = self._clamp(self.throttle - self.throttle_step, 0.0, self.max_throttle)
         elif key == 'a':
-            self.steering_velocity = self._clamp(self.steering_velocity - 2.0, -20.0, 20.0)
             if not self.emergency_stop:
                 self.motion_enable = True
                 self.steering_velocity = self._clamp(self.steering_velocity - 2.0, -20.0, 20.0)
         elif key == 'd':
-            self.steering_velocity = self._clamp(self.steering_velocity + 2.0, -20.0, 20.0)
             if not self.emergency_stop:
                 self.motion_enable = True
                 self.steering_velocity = self._clamp(self.steering_velocity + 2.0, -20.0, 20.0)
