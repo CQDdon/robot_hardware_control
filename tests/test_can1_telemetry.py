@@ -9,7 +9,7 @@ Quy cách dữ liệu:
     - Giá trị decimal ~4000..5000 đại diện cho 40.00V .. 50.00V (đơn vị 0.01V, tức chia 100.0).
 - ID 0x751 (Vehicle Speed):
     - Đọc 4 byte đầu (bytes [0..3]), định dạng little-endian uint32.
-    - Giá trị raw từ 0 đến 4095 tương ứng với 0.0 đến 25.0 km/h (speed_kmh = raw / 4095.0 * 25.0).
+    - Giá trị raw từ 0 đến 3696 tương ứng với 0.0 đến 25.0 km/h (speed_kmh = raw / 3696.0 * 25.0).
 """
 
 import argparse
@@ -100,9 +100,9 @@ class Can1TelemetryListener(can.Listener):
         # ============================================================
         elif can_id == 0x751 and len(data) >= 4:
             raw_speed = struct.unpack_from("<I", data, 0)[0]
-            # Giới hạn an toàn trong khoảng 0..4095
-            clamped_raw = min(max(raw_speed, 0), 4095)
-            speed_kmh = (clamped_raw / 4095.0) * 25.0
+            # Giới hạn an toàn trong khoảng 0..3696
+            clamped_raw = min(max(raw_speed, 0), 3696)
+            speed_kmh = (clamped_raw / 3696.0) * 25.0
             speed_mps = speed_kmh / 3.6
 
             with lock:
@@ -185,7 +185,7 @@ def build_dashboard(interface: str, bitrate: int):
     spd_age_str = f"[bold green]{spd_age:5.0f} ms[/]" if spd_age < 500 else f"[red]{spd_age:5.0f} ms (TIMEOUT)[/]"
     spd_text = (
         f"[bold cyan text]Vận tốc: {spd_kmh:5.2f} km/h[/]  ({spd_mps:4.2f} m/s)\n"
-        f"Raw Dec: [cyan]{spd_raw}[/] / 4095 (Max: 25.0 km/h)\n"
+        f"Raw Dec: [cyan]{spd_raw}[/] / 3696 (Max: 25.0 km/h)\n"
         f"Tần số: [magenta]{spd_hz} Hz[/] | Tổng gói: {spd_cnt}\n"
         f"Tuổi gói: {spd_age_str}\n"
         f"Raw Hex: [dim]{spd_hex}[/]"
@@ -210,7 +210,7 @@ def build_dashboard(interface: str, bitrate: int):
     table.add_row(
         "🏎️  Tốc độ xe (ID 0x751)",
         f"[cyan]{spd_kmh:.2f} km/h[/] ({spd_mps:.2f} m/s)",
-        f"{spd_raw}/4095",
+        f"{spd_raw}/3696",
         f"{spd_hz} Hz",
         "OK" if spd_age < 1000 else "[red]NO SIGNAL[/]"
     )

@@ -269,8 +269,8 @@ namespace hardware_system_handler
                 {
                     uint32_t raw_spd = 0;
                     std::memcpy(&raw_spd, &frame.data[0], sizeof(uint32_t));
-                    uint32_t clamped = (raw_spd > 4095) ? 4095 : raw_spd;
-                    float kmh = (static_cast<float>(clamped) / 4095.0f) * 25.0f;
+                    uint32_t clamped = (raw_spd > 3696) ? 3696 : raw_spd;
+                    float kmh = (static_cast<float>(clamped) / 3696.0f) * 25.0f;
                     vehicle_speed_kmh_.store(kmh, std::memory_order_relaxed);
                     vehicle_speed_last_ns_.store(now_ns, std::memory_order_relaxed);
                 }

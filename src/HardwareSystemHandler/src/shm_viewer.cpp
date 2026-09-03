@@ -116,8 +116,8 @@ void can1_rx_worker()
             {
                 uint32_t raw_spd = 0;
                 std::memcpy(&raw_spd, &frame.data[0], sizeof(uint32_t));
-                uint32_t clamped = (raw_spd > 4095) ? 4095 : raw_spd;
-                float kmh = (static_cast<float>(clamped) / 4095.0f) * 25.0f;
+                uint32_t clamped = (raw_spd > 3696) ? 3696 : raw_spd;
+                float kmh = (static_cast<float>(clamped) / 3696.0f) * 25.0f;
                 g_can1_speed_raw.store(raw_spd, std::memory_order_relaxed);
                 g_can1_speed_kmh.store(kmh, std::memory_order_relaxed);
                 g_can1_speed_mps.store(kmh / 3.6f, std::memory_order_relaxed);
@@ -220,7 +220,7 @@ void print_dashboard(const HwiStateBlock& state, const HwiCommandIfBlock& cmd_if
     if (spd_age_ms < 1500.0) {
         std::cout << "  * Vehicle Speed   (ID 0x751)  : " << CYAN << BOLD << std::fixed << std::setprecision(2)
                   << spd_kmh << " km/h" << RESET << " (" << std::fixed << std::setprecision(2) << spd_mps << " m/s)"
-                  << " (raw: " << spd_raw << "/4095, " << std::fixed << std::setprecision(0) << spd_age_ms << " ms ago)" << "\n";
+                  << " (raw: " << spd_raw << "/3696, " << std::fixed << std::setprecision(0) << spd_age_ms << " ms ago)" << "\n";
     } else {
         std::cout << "  * Vehicle Speed   (ID 0x751)  : " << RED << "[NO SIGNAL / TIMEOUT]" << RESET;
         if (!g_can1_socket_ok) std::cout << YELLOW << " (can1 interface offline/down)" << RESET;
