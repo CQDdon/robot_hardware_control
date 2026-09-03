@@ -14,6 +14,13 @@
 #include <stdexcept>
 #include <sstream>
 #include <cstdlib>
+#include <cstring>
+#include <unistd.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <linux/can.h>
+#include <linux/can/raw.h>
 
 namespace
 {
@@ -161,6 +168,8 @@ namespace hardware_system_handler
     HshNode::HshNode(const rclcpp::NodeOptions & options) : rclcpp::Node("hsh_node", options)
     {
         bypass_position_homing_ = this->declare_parameter<bool>("bypass_position_homing", false);
+        stationary_speed_threshold_kmh_ = static_cast<float>(this->declare_parameter<double>("stationary_speed_threshold_kmh", 0.5));
+        estop_recovery_steer_ratio_ = static_cast<float>(this->declare_parameter<double>("estop_recovery_steer_ratio", 0.10));
         homing_required_ = !bypass_position_homing_;
         if (bypass_position_homing_)
         {
@@ -170,6 +179,8 @@ namespace hardware_system_handler
         {
             throw std::runtime_error("Failed to open shared memory segments");
         }
+
+        can1_thread_ = std::thread(&HshNode::can1_rx_worker, this);
 
         poll_timer_ = this->create_wall_timer(
             100ms, std::bind(&HshNode::poll_shared_memory, this));
@@ -186,6 +197,93 @@ namespace hardware_system_handler
 
         axis_error_pub_ = this->create_publisher<std_msgs::msg::String>("/hsh/axis_errors", 5000);
         fsm_state_pub_ = this->create_publisher<std_msgs::msg::String>("/hsh/fsm_state", 10);
+    }
+
+    HshNode::~HshNode()
+    {
+        can1_running_ = false;
+        if (can1_thread_.joinable())
+        {
+            can1_thread_.join();
+        }
+    }
+
+    void HshNode::can1_rx_worker()
+    {
+        while (can1_running_)
+        {
+            int s = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+            if (s < 0)
+            {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
+            }
+
+            struct ifreq ifr;
+            std::memset(&ifr, 0, sizeof(ifr));
+            std::strncpy(ifr.ifr_name, "can1", IFNAMSIZ - 1);
+            if (ioctl(s, SIOCGIFINDEX, &ifr) < 0)
+            {
+                close(s);
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
+            }
+
+            struct sockaddr_can addr{};
+            addr.can_family = AF_CAN;
+            addr.can_ifindex = ifr.ifr_ifindex;
+
+            struct can_filter rfilter[2];
+            rfilter[0].can_id = 0x751;
+            rfilter[0].can_mask = CAN_SFF_MASK;
+            rfilter[1].can_id = 0x753;
+            rfilter[1].can_mask = CAN_SFF_MASK;
+            setsockopt(s, SOL_CAN_RAW, CAN_RAW_FILTER, &rfilter, sizeof(rfilter));
+
+            struct timeval tv{};
+            tv.tv_sec = 0;
+            tv.tv_usec = 250000;
+            setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+            if (bind(s, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0)
+            {
+                close(s);
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
+            }
+
+            while (can1_running_)
+            {
+                struct can_frame frame{};
+                int nbytes = read(s, &frame, sizeof(struct can_frame));
+                if (nbytes < 0)
+                {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                    break;
+                }
+
+                const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+
+                if (frame.can_id == 0x751 && frame.can_dlc >= 4)
+                {
+                    uint32_t raw_spd = 0;
+                    std::memcpy(&raw_spd, &frame.data[0], sizeof(uint32_t));
+                    uint32_t clamped = (raw_spd > 4095) ? 4095 : raw_spd;
+                    float kmh = (static_cast<float>(clamped) / 4095.0f) * 25.0f;
+                    vehicle_speed_kmh_.store(kmh, std::memory_order_relaxed);
+                    vehicle_speed_last_ns_.store(now_ns, std::memory_order_relaxed);
+                }
+                else if (frame.can_id == 0x753 && frame.can_dlc >= 8)
+                {
+                    uint32_t raw_bat = 0;
+                    std::memcpy(&raw_bat, &frame.data[4], sizeof(uint32_t));
+                    vehicle_battery_v_.store(static_cast<float>(raw_bat) / 100.0f, std::memory_order_relaxed);
+                }
+            }
+
+            close(s);
+        }
     }
 
     bool HshNode::open_shared_memory()
@@ -825,7 +923,34 @@ namespace hardware_system_handler
         }
 
         // Mode switch: DI6 on CAN Relay module (1 = Auto, 0 = Manual)
-        const bool is_auto = have_state_snapshot_ && (last_state_.relay.is_auto_mode != 0);
+        const bool raw_is_auto = have_state_snapshot_ && (last_state_.relay.is_auto_mode != 0);
+        const float cur_speed_kmh = vehicle_speed_kmh_.load(std::memory_order_relaxed);
+        const bool is_stationary = (cur_speed_kmh <= stationary_speed_threshold_kmh_);
+
+        if (!effective_mode_initialized_ && have_state_snapshot_)
+        {
+            effective_auto_mode_ = raw_is_auto;
+            effective_mode_initialized_ = true;
+            RCLCPP_INFO(logger_, "Initial drive mode: %s", effective_auto_mode_ ? "AUTO" : "MANUAL");
+        }
+        else if (have_state_snapshot_ && raw_is_auto != effective_auto_mode_)
+        {
+            // Chuyển chế độ (Auto <-> Manual) chỉ chấp nhận khi xe tĩnh (vận tốc xấp xỉ 0)
+            if (is_stationary)
+            {
+                effective_auto_mode_ = raw_is_auto;
+                RCLCPP_INFO(logger_, "Drive mode transitioned to: %s (vehicle stationary: %.2f km/h <= %.2f km/h)",
+                            effective_auto_mode_ ? "AUTO" : "MANUAL", cur_speed_kmh, stationary_speed_threshold_kmh_);
+            }
+            else
+            {
+                RCLCPP_WARN_THROTTLE(logger_, *get_clock(), 1000,
+                                     "Mode switch to %s REJECTED: vehicle is moving (speed: %.2f km/h > threshold %.2f km/h)",
+                                     raw_is_auto ? "AUTO" : "MANUAL", cur_speed_kmh, stationary_speed_threshold_kmh_);
+            }
+        }
+
+        const bool is_auto = effective_auto_mode_;
 
         if (current_state == FsmState::Ready)
         {
@@ -878,6 +1003,38 @@ namespace hardware_system_handler
 
         if (current_state == FsmState::Stop)
         {
+            // Kiểm tra điều kiện phục hồi sau E-Stop:
+            // 1. Nút E-Stop đã được nhả (is_estop_active == 0)
+            const bool estop_released = have_state_snapshot_ && (last_state_.relay.is_estop_active == 0);
+
+            // 2. Xe đang tĩnh (vận tốc xấp xỉ 0)
+            const float cur_speed_kmh = vehicle_speed_kmh_.load(std::memory_order_relaxed);
+            const bool is_stationary = (cur_speed_kmh <= stationary_speed_threshold_kmh_);
+
+            // 3. Góc lái nằm trong khoảng 10% biến trở tính từ trung tâm (Center 43.1%, Half-span 30.6%)
+            const float pot_pct = have_state_snapshot_ ? last_state_.rs485.steering_pot_percent : 43.1f;
+            constexpr float kPotCenter = 43.1f;
+            constexpr float kPotHalfSpan = 30.6f;
+            const float normalized_steer = (pot_pct - kPotCenter) / kPotHalfSpan;
+            const bool steer_centered = (std::abs(normalized_steer) <= estop_recovery_steer_ratio_);
+
+            // 4. Các trục ODrive online và không có lỗi nghiêm trọng chưa xóa
+            const bool axes_healthy = !any_offline && !any_error;
+
+            if (estop_released && is_stationary && steer_centered && axes_healthy)
+            {
+                RCLCPP_INFO(logger_, "E-Stop recovery conditions met: E-Stop released, vehicle stationary (%.2f km/h <= %.2f km/h), steering centered (pot: %.1f%%, norm: %.2f <= %.2f). Transitioning STOP -> READY.",
+                            cur_speed_kmh, stationary_speed_threshold_kmh_, pot_pct, std::abs(normalized_steer), estop_recovery_steer_ratio_);
+                log_event("EvEStopReset (E-Stop Cleared)");
+                estop_brake_latched_ = false;
+                for (size_t i = 0; i < SHM_MAX_AXES; ++i) {
+                    brake_reference_valid_[i] = false;
+                }
+                HardwareSystemHandler::dispatch(EvEStopReset{});
+                current_state = get_fsm_state();
+                return;
+            }
+
             motion_allowed_.store(false);
             ctrl->motion_enable = false;
             ctrl->rs485.throttle_voltage = 0.0f;

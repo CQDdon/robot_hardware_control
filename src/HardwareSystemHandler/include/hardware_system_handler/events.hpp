@@ -16,6 +16,7 @@ struct EvHomingRequired : tinyfsm::Event {};
 struct EvEnableCmd : tinyfsm::Event {};
 struct EvClearError : tinyfsm::Event {};
 struct EvCriticalError : tinyfsm::Event {};
+struct EvEStopReset : tinyfsm::Event {};
 
 inline std::atomic<bool> motion_allowed_{false};
 // inline std::atomic<bool> homing_required_{false};

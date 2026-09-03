@@ -20,6 +20,7 @@ struct HardwareSystemHandler : tinyfsm::Fsm<HardwareSystemHandler>
   virtual void react(EvEnableCmd const &) { }
   virtual void react(EvClearError const &) { }
   virtual void react(EvCriticalError const &) { }
+  virtual void react(EvEStopReset const &) { }
 
   // Catch-all for unhandled events
   template <typename Event>

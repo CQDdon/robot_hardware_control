@@ -100,10 +100,11 @@ class VehicleKeyboardTeleop(Node):
         elif key == 'e':
             self.motion_enable = not self.motion_enable
         elif key == 'x':
-            self.emergency_stop = True
-            self.motion_enable = False
-            self.throttle = 0.0
-            self.steering_velocity = 0.0
+            self.emergency_stop = not self.emergency_stop
+            if self.emergency_stop:
+                self.motion_enable = False
+                self.throttle = 0.0
+                self.steering_velocity = 0.0
         elif key in '12345':
             self.io_output_mask ^= 1 << (int(key) - 1)
         elif key in '678':

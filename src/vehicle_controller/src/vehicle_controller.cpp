@@ -29,6 +29,7 @@ controller_interface::CallbackReturn VehicleController::on_init()
     auto_declare<std::vector<std::string>>("wheel_joints", {"RearRightWheel_Joint"});
     auto_declare<double>("position_max_offset_turns", position_max_offset_turns_);
     auto_declare<double>("max_steering_angle_rad", max_steering_angle_rad_);
+    auto_declare<double>("steering_pot_limit_ratio", steering_pot_limit_ratio_);
     auto_declare<double>("max_wheel_velocity_rad_s", max_wheel_velocity_rad_s_);
     auto_declare<int>("command_timeout_ms", command_timeout_ms_);
     auto_declare<bool>("require_function_command", require_function_command_);
@@ -76,6 +77,7 @@ controller_interface::CallbackReturn VehicleController::on_configure(const rclcp
   wheel_joints_ = get_node()->get_parameter("wheel_joints").as_string_array();
   position_max_offset_turns_ = get_node()->get_parameter("position_max_offset_turns").as_double();
   max_steering_angle_rad_ = get_node()->get_parameter("max_steering_angle_rad").as_double();
+  steering_pot_limit_ratio_ = get_node()->get_parameter("steering_pot_limit_ratio").as_double();
   max_wheel_velocity_rad_s_ = get_node()->get_parameter("max_wheel_velocity_rad_s").as_double();
   command_timeout_ms_ = get_node()->get_parameter("command_timeout_ms").as_int();
   require_function_command_ = get_node()->get_parameter("require_function_command").as_bool();
@@ -259,7 +261,27 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
     set_position_command(motion.brake_percentage, false, false);
 
     // 2. Vận tốc đánh lái (Steering velocity) cho motor quay bánh lái ODrive:
-    const double steering_velocity = motion.steering_angle_rad;
+    double steering_velocity = motion.steering_angle_rad;
+
+    // Giới hạn an toàn 85% hành trình biến trở (Left 12.5%, Center 43.1%, Right 73.7%, Half-Span 30.6%)
+    const bool has_steering_pot = state_interfaces_.size() >= system_state_index + 5;
+    if (has_steering_pot) {
+      const float pot_pct = static_cast<float>(state_interfaces_[system_state_index + 4].get_value());
+      constexpr float kPotCenter = 43.1f;
+      constexpr float kPotHalfSpan = 30.6f;
+      const float normalized_steer = (pot_pct - kPotCenter) / kPotHalfSpan;
+      const float limit_ratio = static_cast<float>(steering_pot_limit_ratio_);
+
+      // Cận trái 85% (<= -0.85): Chặn vận tốc bẻ tiếp sang trái (< 0)
+      if (normalized_steer <= -limit_ratio && steering_velocity < 0.0) {
+        steering_velocity = 0.0;
+      }
+      // Cận phải 85% (>= +0.85): Chặn vận tốc bẻ tiếp sang phải (> 0)
+      else if (normalized_steer >= limit_ratio && steering_velocity > 0.0) {
+        steering_velocity = 0.0;
+      }
+    }
+
     for (size_t i = 0; i < wheel_count; ++i) command_interfaces_[wheel_offset + i].set_value(steering_velocity);
 
     // 3. Logic tuần tự hóa Relay truyền động (Relay 6/7 -> Relay 8 -> Nạp ga):

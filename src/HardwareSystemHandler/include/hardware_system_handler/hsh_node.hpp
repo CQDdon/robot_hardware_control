@@ -6,6 +6,7 @@
 #include <memory>
 #include <deque>
 #include <limits>
+#include <thread>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
 #include "hardware_ipc_common/shared_memory.hpp"
@@ -19,7 +20,7 @@ namespace hardware_system_handler
     {
     public:
         explicit HshNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
-        ~HshNode() override = default;
+        ~HshNode() override;
 
     private:
         rclcpp::Logger logger_{rclcpp::get_logger("HardwareSystemHandler")};
@@ -98,6 +99,18 @@ namespace hardware_system_handler
         bool brake_reference_valid_[SHM_MAX_AXES]{false};
         float brake_reference_turns_[SHM_MAX_AXES]{0.0f};
 
+        // CAN1 Vehicle Telemetry and Mode Interlock
+        std::atomic<bool> can1_running_{true};
+        std::atomic<float> vehicle_speed_kmh_{0.0f};
+        std::atomic<int64_t> vehicle_speed_last_ns_{0};
+        std::atomic<float> vehicle_battery_v_{0.0f};
+        std::thread can1_thread_;
+        void can1_rx_worker();
+
+        float stationary_speed_threshold_kmh_{0.5f};
+        float estop_recovery_steer_ratio_{0.10f};
+        bool effective_auto_mode_{false};
+        bool effective_mode_initialized_{false};
     };
 
 } // namespace hardware_system_handler

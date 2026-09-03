@@ -145,20 +145,34 @@ int main(int argc, char **argv)
     assert(ctrl.axes[1].desired_axis_state == AxisDesiredState::Idle && "FAILED: Wheel axis must be Idle");
     std::cout << "  [PASS] E-Stop Safety Shutdown & Brake Locking OK!\n\n";
 
-    std::cout << "[TEST 5] Testing E-Stop Latching (Cannot recover automatically without reset)...\n";
+    std::cout << "[TEST 5] Testing E-Stop Latching while Steering is turned > 10%...\n";
     {
         std::lock_guard<std::mutex> lock(data_mutex);
-        sim_state.relay.is_estop_active = 0; // DI7 hồi phục về bình thường nhưng FSM phải chốt ở STOP
+        sim_state.relay.is_estop_active = 0; // DI7 hồi phục về bình thường nhưng góc lái lệch 22.5% (> 10%)
     }
     std::this_thread::sleep_for(300ms);
 
     shm.read_control(ctrl);
-    assert(ctrl.motion_enable == 0 && "FAILED: STOP state must remain latched until explicit system reset");
+    assert(ctrl.motion_enable == 0 && "FAILED: STOP state must remain latched while steering is turned > 10%");
     assert(ctrl.rs485.throttle_voltage == 0.0f && "FAILED: throttle must remain locked");
-    std::cout << "  [PASS] STOP State Latch OK!\n\n";
+    std::cout << "  [PASS] STOP State Latch when Steering Turned OK!\n\n";
+
+    std::cout << "[TEST 6] Testing E-Stop Recovery (Vehicle stationary + Steering centered <= 10%)...\n";
+    {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        sim_state.relay.is_estop_active = 0; // DI7 released
+        sim_state.rs485.steering_pot_percent = 43.1f; // Vô lăng trả về thẳng lái (43.1% trung tâm)
+    }
+    std::this_thread::sleep_for(400ms);
+
+    shm.read_control(ctrl);
+    std::cout << "  -> After centering steering: motion_enable = " << (int)ctrl.motion_enable
+              << ", throttle_voltage = " << ctrl.rs485.throttle_voltage << " V\n";
+    assert(ctrl.motion_enable == 1 && "FAILED: FSM must recover from STOP to READY/RUNNING when steering centered");
+    std::cout << "  [PASS] E-Stop Recovery when Centered OK!\n\n";
 
     std::cout << "====================================================\n";
-    std::cout << " ALL 5 BEHAVIORAL VERIFICATION TESTS PASSED (100%)! \n";
+    std::cout << " ALL 6 BEHAVIORAL VERIFICATION TESTS PASSED (100%)! \n";
     std::cout << "====================================================\n";
 
     ticker_running.store(false);
