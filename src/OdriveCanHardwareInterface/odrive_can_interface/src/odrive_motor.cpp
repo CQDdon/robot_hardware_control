@@ -85,19 +85,27 @@ bool OdriveMotor::setHoming()
 bool OdriveMotor::setTarget(float value)
 {
     uint8_t cmd_id = 0;
+    std::vector<uint8_t> data;
     switch (mode_)
     {
     case VELOCITY:
         cmd_id = CMD_SET_INPUT_VEL;
+        // ODrive CAN Simple protocol: Set_Input_Vel requires 8 bytes:
+        // Bytes 0..3: Input_Vel (float), Bytes 4..7: Input_Torque_FF (float, default 0.0f)
+        data.resize(8, 0);
+        std::memcpy(data.data(), &value, sizeof(float));
         break;
     case POSITION:
         cmd_id = CMD_SET_INPUT_POS;
+        data = floatToBytes(value);
         break;
     case TORQUE:
         cmd_id = CMD_SET_INPUT_TORQUE;
+        data = floatToBytes(value);
         break;
     }
     return sendCommand(cmd_id, floatToBytes(value));
+    return sendCommand(cmd_id, data);
 }
 
 uint8_t OdriveMotor::getDeviceId() const

@@ -351,6 +351,8 @@ namespace odrive_can_interface
     }
 
     HwiCommandIfBlock out = cmd_if;
+    HwiCommandIfBlock out{};
+    (void)shmitf_.read_cmd_if(out);
     out.axis_count = static_cast<uint8_t>(
         std::min(info_.joints.size(), static_cast<size_t>(SHM_MAX_AXES)));
     out.timestamp_ns = static_cast<uint64_t>(time.nanoseconds());

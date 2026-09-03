@@ -79,12 +79,23 @@ class VehicleKeyboardTeleop(Node):
         key = key.lower()
         if key == 'w':
             self.throttle = self._clamp(self.throttle + self.throttle_step, 0.0, self.max_throttle)
+            if not self.emergency_stop:
+                self.motion_enable = True
+                self.throttle = self._clamp(self.throttle + self.throttle_step, 0.0, self.max_throttle)
         elif key == 's':
             self.throttle = self._clamp(self.throttle - self.throttle_step, 0.0, self.max_throttle)
+            if not self.emergency_stop:
+                self.throttle = self._clamp(self.throttle - self.throttle_step, 0.0, self.max_throttle)
         elif key == 'a':
             self.steering_velocity = self._clamp(self.steering_velocity - 2.0, -20.0, 20.0)
+            if not self.emergency_stop:
+                self.motion_enable = True
+                self.steering_velocity = self._clamp(self.steering_velocity - 2.0, -20.0, 20.0)
         elif key == 'd':
             self.steering_velocity = self._clamp(self.steering_velocity + 2.0, -20.0, 20.0)
+            if not self.emergency_stop:
+                self.motion_enable = True
+                self.steering_velocity = self._clamp(self.steering_velocity + 2.0, -20.0, 20.0)
         elif key == 'c':
             self.steering_velocity = 0.0
         elif key == ' ':
@@ -93,8 +104,12 @@ class VehicleKeyboardTeleop(Node):
             self.position_level = 0
         elif key == 'r':
             self.gear = VehicleMotionCommand.GEAR_DRIVE
+            if not self.emergency_stop:
+                self.motion_enable = True
         elif key == 'f':
             self.gear = VehicleMotionCommand.GEAR_REVERSE
+            if not self.emergency_stop:
+                self.motion_enable = True
         elif key == 'n':
             self.gear = VehicleMotionCommand.GEAR_NEUTRAL
         elif key == 'e':
@@ -105,6 +120,8 @@ class VehicleKeyboardTeleop(Node):
                 self.motion_enable = False
                 self.throttle = 0.0
                 self.steering_velocity = 0.0
+            else:
+                self.motion_enable = True
         elif key in '12345':
             self.io_output_mask ^= 1 << (int(key) - 1)
         elif key in '678':

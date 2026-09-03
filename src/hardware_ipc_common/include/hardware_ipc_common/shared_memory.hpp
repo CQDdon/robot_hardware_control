@@ -19,6 +19,7 @@ constexpr const char *SHM_HWI_SENSOR_STATE = "/hwi_to_hsh_sensor_state";
 constexpr const char *SHM_HSH_CTRL = "/hsh_to_hwi_ctrl";
 
 constexpr unsigned SHM_SNAPSHOT_READ_RETRIES = 3;
+constexpr unsigned SHM_SNAPSHOT_READ_RETRIES = 20;
 
 constexpr size_t SHM_MAX_AXES = 8;
 constexpr size_t SHM_MAX_SENSORS = 8;
