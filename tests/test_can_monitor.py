@@ -35,6 +35,8 @@ from rich.table import Table
 # ============================================================
 
 DECODERS = {
+    0x751: ("Speed_kmh", 0, "<I", 25.0 / 4095.0),
+    0x753: ("Battery_V", 4, "<I", 0.01),
     # 0x500: ("RelayCmd", 0, "<B", 1),
     # 0x580: ("RelayStatus", 0, "<B", 1),
     # 0x009: ("ODrive0_Pos", 0, "<f", 1.0),

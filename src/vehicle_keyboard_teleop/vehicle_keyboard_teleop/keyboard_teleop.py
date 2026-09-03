@@ -39,7 +39,7 @@ class VehicleKeyboardTeleop(Node):
         self.throttle = 0.0
         self.steering_velocity = 0.0
         # Position axis is released (IDLE) by default. Space selects one of
-        # three relative offsets: current +10, +20, or +30 turns.
+        # three relative offsets: current +1, +2, or +3 turns.
         self.position_level = 0
         self.gear = VehicleMotionCommand.GEAR_DRIVE
         self.motion_enable = False
@@ -137,7 +137,7 @@ class VehicleKeyboardTeleop(Node):
         text = (f'\r Gear={gear_str:<7} | '
                 f'Ga={self.throttle:5.1f}% | '
                 f'V_Lái={self.steering_velocity:+5.1f} rad/s | '
-                f'Phanh=+{10 * self.position_level} turns | '
+                f'Phanh=+{1.0 * self.position_level:.1f} turns | '
                 f'Motion={"ON " if self.motion_enable else "OFF"} | '
                 f'Estop={"ON " if self.emergency_stop else "OFF"} | '
                 f'AuxRelay=[0x{self.io_output_mask & 0x1F:02X}]   ')

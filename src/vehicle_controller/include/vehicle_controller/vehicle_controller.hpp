@@ -71,7 +71,8 @@ private:
 
   std::vector<std::string> brake_joints_;
   std::vector<std::string> wheel_joints_;
-  double position_max_offset_turns_{30.0};
+  double position_max_offset_turns_{3.0};
+  double max_steering_angle_rad_{1.0};
   double max_wheel_velocity_rad_s_{20.0};
   int command_timeout_ms_{250};
   bool require_function_command_{true};

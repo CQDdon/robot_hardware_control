@@ -5,6 +5,7 @@
 #include <chrono>
 #include <csignal>
 #include <atomic>
+#include <algorithm>
 #include "hardware_ipc_common/shared_memory.hpp"
 
 using namespace hardware_ipc_common;
@@ -98,7 +99,11 @@ void print_dashboard(const HwiStateBlock& state, const HwiCommandIfBlock& cmd_if
         if (b > 0) std::cout << " ";
     }
     std::cout << "])" << RESET << "\n";
-    std::cout << "  * Steering Pot (RS485 AI8 / 0x0007): " << CYAN << std::fixed << std::setprecision(1) << state.rs485.steering_pot_percent << " %" << RESET << "\n";
+    const float pot = state.rs485.steering_pot_percent;
+    const float norm_steer = std::clamp((pot - 43.1f) / 30.6f, -1.0f, 1.0f);
+    const char* steer_dir = (norm_steer > 0.05f) ? " [RIGHT]" : ((norm_steer < -0.05f) ? " [LEFT]" : " [CENTER]");
+    std::cout << "  * Steering Pot (RS485 AI8 / 0x0007): " << CYAN << std::fixed << std::setprecision(1) << pot << " %"
+              << " (" << std::showpos << (norm_steer * 100.0f) << "%" << steer_dir << ")" << std::noshowpos << RESET << "\n";
     std::cout << "  * Throttle Output (RS485 AO8 / 0x0007): " << CYAN << std::fixed << std::setprecision(2) << ctrl.rs485.throttle_voltage << " V" << RESET << "\n";
     
     // Relay Mask in binary & hex

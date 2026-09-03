@@ -8,8 +8,10 @@ vehicle_controller:
   ros__parameters:
     brake_joints: [RearRightDriver_Joint]
     wheel_joints: [RearRightWheel_Joint]
-    # Axis 4 target is current feedback plus an offset in ODrive turns.
-    position_max_offset_turns: 30.0
+    # Axis 4 target is current feedback plus an offset in ODrive turns (max 3 turns).
+    position_max_offset_turns: 3.0
+    # Steering potentiometer calibration: left=12.5%, center=43.1%, right=73.7%
+    max_steering_angle_rad: 1.0
     # Axis 5 limit: +/-5 turns/s, expressed here in ROS rad/s.
     max_wheel_velocity_rad_s: 31.4159265359
     command_timeout_ms: 250

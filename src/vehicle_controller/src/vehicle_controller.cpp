@@ -28,6 +28,7 @@ controller_interface::CallbackReturn VehicleController::on_init()
     auto_declare<std::vector<std::string>>("brake_joints", {"RearRightDriver_Joint"});
     auto_declare<std::vector<std::string>>("wheel_joints", {"RearRightWheel_Joint"});
     auto_declare<double>("position_max_offset_turns", position_max_offset_turns_);
+    auto_declare<double>("max_steering_angle_rad", max_steering_angle_rad_);
     auto_declare<double>("max_wheel_velocity_rad_s", max_wheel_velocity_rad_s_);
     auto_declare<int>("command_timeout_ms", command_timeout_ms_);
     auto_declare<bool>("require_function_command", require_function_command_);
@@ -74,6 +75,7 @@ controller_interface::CallbackReturn VehicleController::on_configure(const rclcp
   brake_joints_ = get_node()->get_parameter("brake_joints").as_string_array();
   wheel_joints_ = get_node()->get_parameter("wheel_joints").as_string_array();
   position_max_offset_turns_ = get_node()->get_parameter("position_max_offset_turns").as_double();
+  max_steering_angle_rad_ = get_node()->get_parameter("max_steering_angle_rad").as_double();
   max_wheel_velocity_rad_s_ = get_node()->get_parameter("max_wheel_velocity_rad_s").as_double();
   command_timeout_ms_ = get_node()->get_parameter("command_timeout_ms").as_int();
   require_function_command_ = get_node()->get_parameter("require_function_command").as_bool();
@@ -242,7 +244,7 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
     throttle_voltage = 0.0;
 
     if (function.received && function.emergency_stop) {
-      // E-Stop khẩn cấp: Ép phanh 100% (target = position_reference_rad_ + 30 turns)
+      // E-Stop khẩn cấp: Ép phanh 100% (target = position_reference_rad_ + position_max_offset_turns_ (3 turns))
       set_position_command(100.0, true, false);
       for (size_t i = 0; i < wheel_count; ++i) command_interfaces_[wheel_offset + i].set_value(0.0);
       command_interfaces_[throttle_offset].set_value(0.0);
@@ -377,9 +379,16 @@ void VehicleController::publish_states(const rclcpp::Time & time, const MotionIn
     const bool has_steering_pot = state_interfaces_.size() >= system_state_index + 5;
     const float steering_pot_pct = has_steering_pot ? static_cast<float>(state_interfaces_[system_state_index + 4].get_value()) : 0.0F;
 
+    // Calibrated steering potentiometer:
+    // Cận trái = 12.5%, Ở giữa = 43.1%, Cận phải = 73.7% (nửa dải đối xứng = 30.6%)
+    constexpr float kPotCenter = 43.1f;
+    constexpr float kPotHalfSpan = 30.6f;
+    const float normalized_steer = std::clamp((steering_pot_pct - kPotCenter) / kPotHalfSpan, -1.0f, 1.0f);
+    const float steering_angle = normalized_steer * static_cast<float>(max_steering_angle_rad_);
+
     auto & out = motion_rt_pub_->msg_;
     out.header.stamp = time;
-    out.steering_angle_rad = steering_pot_pct; // Tạm thời gửi trực tiếp % biến trở lên topic
+    out.steering_angle_rad = steering_angle;
     out.wheel_velocity_rad_s = static_cast<float>(wheel_velocity);
     const bool throttle_active = !safe && (drive_seq_state_ == DriveSequenceState::RUNNING);
     out.speed_percentage = throttle_active ? static_cast<float>(motion.speed_percentage) : 0.0F;

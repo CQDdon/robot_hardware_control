@@ -895,9 +895,8 @@ namespace hardware_system_handler
                             brake_reference_turns_[i] = cur_turns;
                             brake_reference_valid_[i] = true;
                         }
-                        // Chốt target 100% phanh = Vị trí gốc nhả phanh + 30.0 vòng
-                        // (Ví dụ: đang đạp +20 vòng thì chỉ kéo thêm đúng +10 vòng nữa)
-                        estop_brake_target_[i] = brake_reference_turns_[i] + 30.0f;
+                        // Chốt target 100% phanh = Vị trí gốc nhả phanh + 3.0 vòng
+                        estop_brake_target_[i] = brake_reference_turns_[i] + 3.0f;
                     }
                     else
                     {
@@ -997,7 +996,7 @@ namespace hardware_system_handler
                             brake_reference_turns_[i] = cur_turns;
                             brake_reference_valid_[i] = true;
                         }
-                        estop_brake_target_[i] = brake_reference_turns_[i] + 30.0f;
+                        estop_brake_target_[i] = brake_reference_turns_[i] + 3.0f;
                     }
                     else
                     {
