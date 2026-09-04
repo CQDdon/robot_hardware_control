@@ -54,6 +54,7 @@ private:
   void motion_callback(const vehicle_msgs::msg::VehicleMotionCommand::SharedPtr msg);
   void function_callback(const vehicle_msgs::msg::VehicleFunctionCommand::SharedPtr msg);
   void write_safe_command();
+  void write_safe_command(uint8_t aux_mask = 0);
   void set_position_command(double position_percentage, bool force_engaged,
                             bool clear_reference_on_release);
   bool is_timed_out(int64_t received_ns, const rclcpp::Time & time) const;

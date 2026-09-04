@@ -196,6 +196,7 @@ void VehicleController::set_position_command(double position_percentage, bool fo
 }
 
 void VehicleController::write_safe_command()
+void VehicleController::write_safe_command(uint8_t aux_mask)
 {
   const size_t brake_count = brake_joints_.size();
   const size_t wheel_count = wheel_joints_.size();
@@ -211,6 +212,9 @@ void VehicleController::write_safe_command()
   const double current_relay = command_interfaces_[relay_offset].get_value();
   const uint8_t aux_mask = static_cast<uint8_t>(std::clamp(std::lround(current_relay), 0L, 255L)) & kAuxRelayMask;
   command_interfaces_[relay_offset].set_value(static_cast<double>(aux_mask));
+  // Set auxiliary relays (bits 0..4: Relays 1..5) while drive relays (bits 5..7: Relays 6..8) are zeroed
+  const uint8_t final_aux = aux_mask & kAuxRelayMask;
+  command_interfaces_[relay_offset].set_value(static_cast<double>(final_aux));
 }
 
 controller_interface::return_type VehicleController::update(const rclcpp::Time & time, const rclcpp::Duration &)
@@ -251,8 +255,10 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
       for (size_t i = 0; i < wheel_count; ++i) command_interfaces_[wheel_offset + i].set_value(0.0);
       command_interfaces_[throttle_offset].set_value(0.0);
       command_interfaces_[relay_offset].set_value(0.0);
+      command_interfaces_[relay_offset].set_value(static_cast<double>(aux_relay_mask));
     } else {
       write_safe_command();
+      write_safe_command(aux_relay_mask);
     }
   } else {
     // 1. Phanh ODrive (Position joint):

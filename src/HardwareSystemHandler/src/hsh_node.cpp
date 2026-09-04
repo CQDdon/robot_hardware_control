@@ -1021,6 +1021,27 @@ namespace hardware_system_handler
             // 4. Các trục ODrive online và không có lỗi nghiêm trọng chưa xóa
             const bool axes_healthy = !any_offline && !any_error;
 
+            if (estop_released)
+            {
+                // Khi E-Stop vật lý đã nhả, tự động gửi yêu cầu xóa lỗi cho các trục ODrive (nếu có lỗi do quá dòng phanh kéo kẹt)
+                if (any_error)
+                {
+                    for (size_t i = 0; i < count; ++i)
+                    {
+                        if (state->axes[i].error != 0)
+                        {
+                            request_clear_errors(i);
+                        }
+                    }
+                    static auto last_clear_t = now;
+                    if ((now - last_clear_t).nanoseconds() > 500000000LL)
+                    {
+                        clear_error_requested_.fill(false);
+                        last_clear_t = now;
+                    }
+                }
+            }
+
             if (estop_released && is_stationary && steer_centered && axes_healthy)
             {
                 RCLCPP_INFO(logger_, "E-Stop recovery conditions met: E-Stop released, vehicle stationary (%.2f km/h <= %.2f km/h), steering centered (pot: %.1f%%, norm: %.2f <= %.2f). Transitioning STOP -> READY.",
@@ -1033,6 +1054,17 @@ namespace hardware_system_handler
                 HardwareSystemHandler::dispatch(EvEStopReset{});
                 current_state = get_fsm_state();
                 return;
+            }
+
+            if (estop_released)
+            {
+                RCLCPP_WARN_THROTTLE(
+                    logger_, *get_clock(), 1000,
+                    "E-Stop da nha nhung chua du dieu kien phuc hoi: Van toc=%.2f km/h (yeu cau <= %.2f), "
+                    "Goc lai=%.1f%% (lech %.1f%%, yeu cau <= 10.0%%), Truc ODrive san sang=%d (error=%d, offline=%d)",
+                    cur_speed_kmh, stationary_speed_threshold_kmh_,
+                    pot_pct, std::abs(normalized_steer) * 100.0f,
+                    axes_healthy, any_error, any_offline);
             }
 
             motion_allowed_.store(false);
@@ -1163,6 +1195,10 @@ namespace hardware_system_handler
                 estop_brake_latched_ = true;
             }
 
+            const bool estop_released = have_state_snapshot_ && (last_state_.relay.is_estop_active == 0);
+            const float cur_speed_kmh = vehicle_speed_kmh_.load(std::memory_order_relaxed);
+            const bool is_stationary = (cur_speed_kmh <= stationary_speed_threshold_kmh_);
+
             for (size_t i = 0; i < count; ++i)
             {
                 const auto interface = cmd_if->axes[i].interface;
@@ -1179,6 +1215,20 @@ namespace hardware_system_handler
                     request_axis_state(i, AxisDesiredState::Idle);
                     ctrl->axes[i].motion_enable = false;
                     ctrl->axes[i].target = 0.0f;
+                    if (estop_released && is_stationary)
+                    {
+                        // E-Stop vật lý đã nhả và xe tĩnh: Cho phép quay motor lái để tài xế bẻ lái về tâm <= 10%
+                        request_axis_state(i, AxisDesiredState::ClosedLoop);
+                        ctrl->axes[i].control_mode = interface;
+                        ctrl->axes[i].motion_enable = true;
+                        ctrl->axes[i].target = cmd_if->axes[i].value / (2.0f * 3.141592f);
+                    }
+                    else
+                    {
+                        request_axis_state(i, AxisDesiredState::Idle);
+                        ctrl->axes[i].motion_enable = false;
+                        ctrl->axes[i].target = 0.0f;
+                    }
                 }
             }
             (void)shmitf_.write_control(desired_control_);
