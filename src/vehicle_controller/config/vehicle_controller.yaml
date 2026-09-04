@@ -14,8 +14,9 @@ vehicle_controller:
     max_steering_angle_rad: 1.0
     # Safety soft limit: only allow ODrive steering within 85% of potentiometer range
     steering_pot_limit_ratio: 0.85
-    # Axis 5 limit: +/-5 turns/s, expressed here in ROS rad/s.
-    max_wheel_velocity_rad_s: 31.4159265359
+    # Steering position limits: -70 to +70 turns
+    steering_max_turns: 70.0
+    steering_ramp_rate_turns_s: 35.0
     command_timeout_ms: 250
     # Bench test: motion_cmd alone drives the axes.  Production should set true.
     require_function_command: false

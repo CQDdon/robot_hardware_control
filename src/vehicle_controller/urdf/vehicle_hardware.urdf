@@ -19,9 +19,11 @@
       <state_interface name="velocity"/>
       <param name="id">4</param>
     </joint>
-    <!-- ODrive node 5: velocity axis. -->
+    <!-- ODrive node 5: position steering axis (-70 to +70 turns). -->
     <joint name="RearRightWheel_Joint">
-      <command_interface name="velocity"/>
+      <command_interface name="position"/>
+      <!-- 0 = closed loop at position target; 1 = ODrive IDLE. -->
+      <command_interface name="idle"/>
       <state_interface name="position"/>
       <state_interface name="velocity"/>
       <param name="id">5</param>

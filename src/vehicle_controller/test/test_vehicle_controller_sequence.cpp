@@ -40,7 +40,8 @@ protected:
     // Prepare hardware interfaces
     cmd_interfaces_.emplace_back("RearRightDriver_Joint", "position", &cmd_brake_pos_);
     cmd_interfaces_.emplace_back("RearRightDriver_Joint", "idle", &cmd_brake_idle_);
-    cmd_interfaces_.emplace_back("RearRightWheel_Joint", "velocity", &cmd_wheel_vel_);
+    cmd_interfaces_.emplace_back("RearRightWheel_Joint", "position", &cmd_wheel_pos_);
+    cmd_interfaces_.emplace_back("RearRightWheel_Joint", "idle", &cmd_wheel_idle_);
     cmd_interfaces_.emplace_back("relay", "relay_mask", &cmd_relay_mask_);
     cmd_interfaces_.emplace_back("rs485", "throttle_voltage", &cmd_throttle_voltage_);
 
@@ -109,7 +110,8 @@ protected:
 
   double cmd_brake_pos_{0.0};
   double cmd_brake_idle_{1.0};
-  double cmd_wheel_vel_{0.0};
+  double cmd_wheel_pos_{0.0};
+  double cmd_wheel_idle_{1.0};
   double cmd_relay_mask_{0.0};
   double cmd_throttle_voltage_{0.0};
 
@@ -283,9 +285,10 @@ TEST_F(VehicleControllerTest, EmergencyStopImmediateCutoff)
   send_function(false, t250, true, 0x15);
   EXPECT_EQ(controller_->update(t250, dt), controller_interface::return_type::OK);
 
-  // Throttle must be zero, all relays must be 0, brake forced 100%
+  // Throttle must be zero, drive relays must be cutoff, aux relays preserved, brake forced 100%
   EXPECT_DOUBLE_EQ(cmd_throttle_voltage_, 0.0);
-  EXPECT_EQ(static_cast<uint8_t>(cmd_relay_mask_), 0);
+  EXPECT_EQ(static_cast<uint8_t>(cmd_relay_mask_) & 0xE0, 0);
+  EXPECT_EQ(static_cast<uint8_t>(cmd_relay_mask_) & 0x1F, 0x15);
   EXPECT_DOUBLE_EQ(cmd_brake_idle_, 0.0); // Engaged
 }
 

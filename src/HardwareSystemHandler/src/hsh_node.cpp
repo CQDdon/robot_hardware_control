@@ -169,7 +169,7 @@ namespace hardware_system_handler
     {
         bypass_position_homing_ = this->declare_parameter<bool>("bypass_position_homing", false);
         stationary_speed_threshold_kmh_ = static_cast<float>(this->declare_parameter<double>("stationary_speed_threshold_kmh", 0.5));
-        estop_recovery_steer_ratio_ = static_cast<float>(this->declare_parameter<double>("estop_recovery_steer_ratio", 0.10));
+        estop_recovery_steer_deviation_ = static_cast<float>(this->declare_parameter<double>("estop_recovery_steer_deviation", 10.0));
         homing_required_ = !bypass_position_homing_;
         if (bypass_position_homing_)
         {
@@ -438,7 +438,7 @@ namespace hardware_system_handler
         bool sent = false;
         for (size_t i = 0; i < count; ++i)
         {
-            if (cmd_if->axes[i].interface != CommandInterface::Position)
+            if (i != 0 || cmd_if->axes[i].interface != CommandInterface::Position)
                 continue;
             if (homing_command_sent_[i] || homing_done_[i])
                 continue;
@@ -690,7 +690,7 @@ namespace hardware_system_handler
                 any_running = true;
             }
 
-            const bool requires_homing = !bypass_position_homing_ &&
+            const bool requires_homing = !bypass_position_homing_ && (i == 0) &&
                 (cmd_if != nullptr) && (cmd_if->axes[i].interface == CommandInterface::Position);
             if (requires_homing)
             {
@@ -1011,12 +1011,11 @@ namespace hardware_system_handler
             const float cur_speed_kmh = vehicle_speed_kmh_.load(std::memory_order_relaxed);
             const bool is_stationary = (cur_speed_kmh <= stationary_speed_threshold_kmh_);
 
-            // 3. Góc lái nằm trong khoảng 10% biến trở tính từ trung tâm (Center 43.1%, Half-span 30.6%)
+            // 3. Góc lái nằm trong khoảng lệch <= 10.0% so với tâm 43.1% (tức pot in [33.1%, 53.1%])
             const float pot_pct = have_state_snapshot_ ? last_state_.rs485.steering_pot_percent : 43.1f;
             constexpr float kPotCenter = 43.1f;
-            constexpr float kPotHalfSpan = 30.6f;
-            const float normalized_steer = (pot_pct - kPotCenter) / kPotHalfSpan;
-            const bool steer_centered = (std::abs(normalized_steer) <= estop_recovery_steer_ratio_);
+            const float pot_deviation = std::abs(pot_pct - kPotCenter);
+            const bool steer_centered = (pot_deviation <= estop_recovery_steer_deviation_);
 
             // 4. Các trục ODrive online và không có lỗi nghiêm trọng chưa xóa
             const bool axes_healthy = !any_offline && !any_error;
@@ -1044,8 +1043,8 @@ namespace hardware_system_handler
 
             if (estop_released && is_stationary && steer_centered && axes_healthy)
             {
-                RCLCPP_INFO(logger_, "E-Stop recovery conditions met: E-Stop released, vehicle stationary (%.2f km/h <= %.2f km/h), steering centered (pot: %.1f%%, norm: %.2f <= %.2f). Transitioning STOP -> READY.",
-                            cur_speed_kmh, stationary_speed_threshold_kmh_, pot_pct, std::abs(normalized_steer), estop_recovery_steer_ratio_);
+                RCLCPP_INFO(logger_, "E-Stop recovery conditions met: E-Stop released, vehicle stationary (%.2f km/h <= %.2f km/h), steering centered (pot: %.1f%%, dev: %.1f%% <= %.1f%%). Transitioning STOP -> READY.",
+                            cur_speed_kmh, stationary_speed_threshold_kmh_, pot_pct, pot_deviation, estop_recovery_steer_deviation_);
                 log_event("EvEStopReset (E-Stop Cleared)");
                 estop_brake_latched_ = false;
                 for (size_t i = 0; i < SHM_MAX_AXES; ++i) {
@@ -1061,9 +1060,9 @@ namespace hardware_system_handler
                 RCLCPP_WARN_THROTTLE(
                     logger_, *get_clock(), 1000,
                     "E-Stop da nha nhung chua du dieu kien phuc hoi: Van toc=%.2f km/h (yeu cau <= %.2f), "
-                    "Goc lai=%.1f%% (lech %.1f%%, yeu cau <= 10.0%%), Truc ODrive san sang=%d (error=%d, offline=%d)",
+                    "Goc lai=%.1f%% (lech %.1f%% so voi tam 43.1%%, yeu cau <= %.1f%%), Truc ODrive san sang=%d (error=%d, offline=%d)",
                     cur_speed_kmh, stationary_speed_threshold_kmh_,
-                    pot_pct, std::abs(normalized_steer) * 100.0f,
+                    pot_pct, pot_deviation, estop_recovery_steer_deviation_,
                     axes_healthy, any_error, any_offline);
             }
 
@@ -1076,7 +1075,8 @@ namespace hardware_system_handler
             {
                 for (size_t i = 0; i < count; ++i)
                 {
-                    if (cmd_if->axes[i].interface == CommandInterface::Position)
+                    const bool is_brake_axis = (i == 0);
+                    if (is_brake_axis)
                     {
                         const float cur_turns = state->axes[i].position / (2.0f * 3.141592f);
                         if (!brake_reference_valid_[i])
@@ -1097,10 +1097,10 @@ namespace hardware_system_handler
 
             for (size_t i = 0; i < count; ++i)
             {
-                const auto interface = cmd_if->axes[i].interface;
-                if (interface == CommandInterface::Position)
+                const bool is_brake_axis = (i == 0);
+                if (is_brake_axis && !estop_released)
                 {
-                    // Trục phanh: Khóa cứng ở Closed Loop tại target +30 vòng đã chốt
+                    // Khi E-Stop đang nhấn: Kéo phanh giữ xe dừng khẩn cấp
                     request_axis_state(i, AxisDesiredState::ClosedLoop);
                     ctrl->axes[i].control_mode = CommandInterface::Position;
                     ctrl->axes[i].motion_enable = true;
@@ -1109,7 +1109,7 @@ namespace hardware_system_handler
                 }
                 else
                 {
-                    // Trục lái: Về IDLE
+                    // Khi ngắt/nhả E-Stop (estop_released) hoặc trục lái (Axis 1): Trả về IDLE
                     request_axis_state(i, AxisDesiredState::Idle);
                     ctrl->axes[i].motion_enable = false;
                     ctrl->axes[i].target = 0.0f;
@@ -1177,7 +1177,8 @@ namespace hardware_system_handler
             {
                 for (size_t i = 0; i < count; ++i)
                 {
-                    if (cmd_if->axes[i].interface == CommandInterface::Position)
+                    const bool is_brake_axis = (i == 0);
+                    if (is_brake_axis)
                     {
                         const float cur_turns = state->axes[i].position / (2.0f * 3.141592f);
                         if (!brake_reference_valid_[i])
@@ -1196,14 +1197,13 @@ namespace hardware_system_handler
             }
 
             const bool estop_released = have_state_snapshot_ && (last_state_.relay.is_estop_active == 0);
-            const float cur_speed_kmh = vehicle_speed_kmh_.load(std::memory_order_relaxed);
-            const bool is_stationary = (cur_speed_kmh <= stationary_speed_threshold_kmh_);
 
             for (size_t i = 0; i < count; ++i)
             {
-                const auto interface = cmd_if->axes[i].interface;
-                if (interface == CommandInterface::Position)
+                const bool is_brake_axis = (i == 0);
+                if (is_brake_axis && !estop_released)
                 {
+                    // Khi E-Stop đang nhấn: Kéo phanh giữ xe dừng khẩn cấp
                     request_axis_state(i, AxisDesiredState::ClosedLoop);
                     ctrl->axes[i].control_mode = CommandInterface::Position;
                     ctrl->axes[i].motion_enable = true;
@@ -1212,23 +1212,10 @@ namespace hardware_system_handler
                 }
                 else
                 {
+                    // Khi ngắt/nhả E-Stop (estop_released) hoặc trục lái (Axis 1): Trả về IDLE
                     request_axis_state(i, AxisDesiredState::Idle);
                     ctrl->axes[i].motion_enable = false;
                     ctrl->axes[i].target = 0.0f;
-                    if (estop_released && is_stationary)
-                    {
-                        // E-Stop vật lý đã nhả và xe tĩnh: Cho phép quay motor lái để tài xế bẻ lái về tâm <= 10%
-                        request_axis_state(i, AxisDesiredState::ClosedLoop);
-                        ctrl->axes[i].control_mode = interface;
-                        ctrl->axes[i].motion_enable = true;
-                        ctrl->axes[i].target = cmd_if->axes[i].value / (2.0f * 3.141592f);
-                    }
-                    else
-                    {
-                        request_axis_state(i, AxisDesiredState::Idle);
-                        ctrl->axes[i].motion_enable = false;
-                        ctrl->axes[i].target = 0.0f;
-                    }
                 }
             }
             (void)shmitf_.write_control(desired_control_);
@@ -1243,7 +1230,7 @@ namespace hardware_system_handler
         for (size_t i = 0; i < count; ++i)
         {
             const auto interface = cmd_if->axes[i].interface;
-            const bool is_brake_axis = interface == CommandInterface::Position;
+            const bool is_brake_axis = (i == 0);
 
             ctrl->axes[i].control_mode = interface;
             if (cmd_if->axes[i].action == ControlAction::Idle)
@@ -1260,8 +1247,7 @@ namespace hardware_system_handler
                 continue;
             }
 
-            // Velocity axes are wheel drives and remain gated by the HSH
-            // motion permission. Never let a disabled wheel retain a stale
+            // Gated by the HSH motion permission. Never let a disabled axis retain a stale
             // closed-loop target.
             if (!is_brake_axis && !ctrl->motion_enable)
             {

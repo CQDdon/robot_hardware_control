@@ -53,7 +53,6 @@ private:
 
   void motion_callback(const vehicle_msgs::msg::VehicleMotionCommand::SharedPtr msg);
   void function_callback(const vehicle_msgs::msg::VehicleFunctionCommand::SharedPtr msg);
-  void write_safe_command();
   void write_safe_command(uint8_t aux_mask = 0);
   void set_position_command(double position_percentage, bool force_engaged,
                             bool clear_reference_on_release);
@@ -75,7 +74,9 @@ private:
   double position_max_offset_turns_{3.0};
   double max_steering_angle_rad_{1.0};
   double steering_pot_limit_ratio_{0.85};
-  double max_wheel_velocity_rad_s_{20.0};
+  double steering_max_turns_{70.0};
+  double steering_ramp_rate_turns_s_{35.0};
+  double current_steering_turns_{0.0};
   int command_timeout_ms_{250};
   bool require_function_command_{true};
 

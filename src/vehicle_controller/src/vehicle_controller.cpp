@@ -30,7 +30,8 @@ controller_interface::CallbackReturn VehicleController::on_init()
     auto_declare<double>("position_max_offset_turns", position_max_offset_turns_);
     auto_declare<double>("max_steering_angle_rad", max_steering_angle_rad_);
     auto_declare<double>("steering_pot_limit_ratio", steering_pot_limit_ratio_);
-    auto_declare<double>("max_wheel_velocity_rad_s", max_wheel_velocity_rad_s_);
+    auto_declare<double>("steering_max_turns", steering_max_turns_);
+    auto_declare<double>("steering_ramp_rate_turns_s", steering_ramp_rate_turns_s_);
     auto_declare<int>("command_timeout_ms", command_timeout_ms_);
     auto_declare<bool>("require_function_command", require_function_command_);
     auto_declare<int>("relay_direction_delay_ms", relay_direction_delay_ms_);
@@ -49,7 +50,8 @@ controller_interface::InterfaceConfiguration VehicleController::command_interfac
   config.type = controller_interface::interface_configuration_type::INDIVIDUAL;
   for (const auto & joint : brake_joints_) config.names.push_back(joint + "/position");
   for (const auto & joint : brake_joints_) config.names.push_back(joint + "/idle");
-  for (const auto & joint : wheel_joints_) config.names.push_back(joint + "/velocity");
+  for (const auto & joint : wheel_joints_) config.names.push_back(joint + "/position");
+  for (const auto & joint : wheel_joints_) config.names.push_back(joint + "/idle");
   config.names.push_back("relay/relay_mask");
   config.names.push_back("rs485/throttle_voltage");
   return config;
@@ -78,7 +80,8 @@ controller_interface::CallbackReturn VehicleController::on_configure(const rclcp
   position_max_offset_turns_ = get_node()->get_parameter("position_max_offset_turns").as_double();
   max_steering_angle_rad_ = get_node()->get_parameter("max_steering_angle_rad").as_double();
   steering_pot_limit_ratio_ = get_node()->get_parameter("steering_pot_limit_ratio").as_double();
-  max_wheel_velocity_rad_s_ = get_node()->get_parameter("max_wheel_velocity_rad_s").as_double();
+  steering_max_turns_ = get_node()->get_parameter("steering_max_turns").as_double();
+  steering_ramp_rate_turns_s_ = get_node()->get_parameter("steering_ramp_rate_turns_s").as_double();
   command_timeout_ms_ = get_node()->get_parameter("command_timeout_ms").as_int();
   require_function_command_ = get_node()->get_parameter("require_function_command").as_bool();
   relay_direction_delay_ms_ = get_node()->get_parameter("relay_direction_delay_ms").as_int();
@@ -86,8 +89,8 @@ controller_interface::CallbackReturn VehicleController::on_configure(const rclcp
   relay_deadtime_ms_ = get_node()->get_parameter("relay_deadtime_ms").as_int();
   if (brake_joints_.empty() || wheel_joints_.empty() || !std::isfinite(position_max_offset_turns_) ||
       position_max_offset_turns_ <= 0.0 ||
-      !std::isfinite(max_wheel_velocity_rad_s_) ||
-      max_wheel_velocity_rad_s_ <= 0.0 || command_timeout_ms_ <= 0 ||
+      !std::isfinite(steering_max_turns_) ||
+      steering_max_turns_ <= 0.0 || command_timeout_ms_ <= 0 ||
       relay_direction_delay_ms_ < 0 || relay_main_delay_ms_ < 0 || relay_deadtime_ms_ < 0) {
     RCLCPP_ERROR(get_node()->get_logger(), "Invalid brake/wheel/relay controller parameters");
     return controller_interface::CallbackReturn::ERROR;
@@ -195,34 +198,46 @@ void VehicleController::set_position_command(double position_percentage, bool fo
   }
 }
 
-void VehicleController::write_safe_command()
 void VehicleController::write_safe_command(uint8_t aux_mask)
 {
   const size_t brake_count = brake_joints_.size();
   const size_t wheel_count = wheel_joints_.size();
-  const size_t wheel_offset = 2 * brake_count;
-  const size_t relay_offset = wheel_offset + wheel_count;
+  const size_t wheel_pos_offset = 2 * brake_count;
+  const size_t wheel_idle_offset = wheel_pos_offset + wheel_count;
+  const size_t relay_offset = 2 * (brake_count + wheel_count);
   const size_t throttle_offset = relay_offset + 1;
-  if (command_interfaces_.size() < throttle_offset + 1 || state_interfaces_.size() < 2 * brake_count) return;
+  if (command_interfaces_.size() < throttle_offset + 1 || state_interfaces_.size() < 2 * (brake_count + wheel_count)) return;
+
+  // 1. Phanh nhả về IDLE
   set_position_command(0.0, false, false);
-  for (size_t i = 0; i < wheel_count; ++i) command_interfaces_[wheel_offset + i].set_value(0.0);
+
+  // 2. Động cơ lái: Trả về IDLE khi mở / safe / dừng
+  for (size_t i = 0; i < wheel_count; ++i) {
+    command_interfaces_[wheel_pos_offset + i].set_value(0.0);
+    command_interfaces_[wheel_idle_offset + i].set_value(1.0); // IDLE
+  }
+
+  // Đồng bộ vị trí đặt góc lái theo vị trí góc lái thực tế hiện tại
+  if (state_interfaces_.size() > wheel_pos_offset) {
+    const double cur_pos_rad = state_interfaces_[wheel_pos_offset].get_value();
+    current_steering_turns_ = cur_pos_rad / (2.0 * M_PI);
+  }
+
+  // 3. Ga về 0.0V
   command_interfaces_[throttle_offset].set_value(0.0);
 
-  // Preserve auxiliary relays (bits 0..4) while clearing drive relays (bits 5..7)
-  const double current_relay = command_interfaces_[relay_offset].get_value();
-  const uint8_t aux_mask = static_cast<uint8_t>(std::clamp(std::lround(current_relay), 0L, 255L)) & kAuxRelayMask;
-  command_interfaces_[relay_offset].set_value(static_cast<double>(aux_mask));
-  // Set auxiliary relays (bits 0..4: Relays 1..5) while drive relays (bits 5..7: Relays 6..8) are zeroed
+  // 4. Relay: Xuất relay phụ 1..5, ngắt relay truyền động 6..8
   const uint8_t final_aux = aux_mask & kAuxRelayMask;
   command_interfaces_[relay_offset].set_value(static_cast<double>(final_aux));
 }
 
-controller_interface::return_type VehicleController::update(const rclcpp::Time & time, const rclcpp::Duration &)
+controller_interface::return_type VehicleController::update(const rclcpp::Time & time, const rclcpp::Duration & period)
 {
   const size_t brake_count = brake_joints_.size();
   const size_t wheel_count = wheel_joints_.size();
-  const size_t wheel_offset = 2 * brake_count;
-  const size_t relay_offset = wheel_offset + wheel_count;
+  const size_t wheel_pos_offset = 2 * brake_count;
+  const size_t wheel_idle_offset = wheel_pos_offset + wheel_count;
+  const size_t relay_offset = 2 * (brake_count + wheel_count);
   const size_t throttle_offset = relay_offset + 1;
   const size_t system_state_index = 2 * (brake_count + wheel_count);
   if (command_interfaces_.size() < throttle_offset + 1 || state_interfaces_.size() < system_state_index + 4) return controller_interface::return_type::ERROR;
@@ -252,12 +267,14 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
     if (function.received && function.emergency_stop) {
       // E-Stop khẩn cấp: Ép phanh 100% (target = position_reference_rad_ + position_max_offset_turns_ (3 turns))
       set_position_command(100.0, true, false);
-      for (size_t i = 0; i < wheel_count; ++i) command_interfaces_[wheel_offset + i].set_value(0.0);
+      // Động cơ lái: Trả về IDLE khi E-Stop
+      for (size_t i = 0; i < wheel_count; ++i) {
+        command_interfaces_[wheel_pos_offset + i].set_value(0.0);
+        command_interfaces_[wheel_idle_offset + i].set_value(1.0); // IDLE
+      }
       command_interfaces_[throttle_offset].set_value(0.0);
-      command_interfaces_[relay_offset].set_value(0.0);
       command_interfaces_[relay_offset].set_value(static_cast<double>(aux_relay_mask));
     } else {
-      write_safe_command();
       write_safe_command(aux_relay_mask);
     }
   } else {
@@ -266,8 +283,16 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
     // Khi brake_percentage > 0.0  -> vào ClosedLoop kéo theo mức %
     set_position_command(motion.brake_percentage, false, false);
 
-    // 2. Vận tốc đánh lái (Steering velocity) cho motor quay bánh lái ODrive:
-    double steering_velocity = motion.steering_angle_rad;
+    // 2. Vị trí đánh lái (Position joint) cho motor quay bánh lái ODrive:
+    double requested_turns = 0.0;
+    if (std::abs(motion.steering_angle_rad) > max_steering_angle_rad_) {
+      requested_turns = motion.steering_angle_rad / (2.0 * M_PI);
+    } else {
+      requested_turns = (motion.steering_angle_rad / max_steering_angle_rad_) * steering_max_turns_;
+    }
+
+    // Giới hạn trong khoảng -70.0 đến +70.0 vòng
+    requested_turns = std::clamp(requested_turns, -steering_max_turns_, steering_max_turns_);
 
     // Giới hạn an toàn 85% hành trình biến trở (Left 12.5%, Center 43.1%, Right 73.7%, Half-Span 30.6%)
     const bool has_steering_pot = state_interfaces_.size() >= system_state_index + 5;
@@ -278,17 +303,35 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
       const float normalized_steer = (pot_pct - kPotCenter) / kPotHalfSpan;
       const float limit_ratio = static_cast<float>(steering_pot_limit_ratio_);
 
-      // Cận trái 85% (<= -0.85): Chặn vận tốc bẻ tiếp sang trái (< 0)
-      if (normalized_steer <= -limit_ratio && steering_velocity < 0.0) {
-        steering_velocity = 0.0;
+      const double cur_pos_rad = state_interfaces_[wheel_pos_offset].get_value();
+      const double cur_turns = cur_pos_rad / (2.0 * M_PI);
+
+      // Cận trái 85% (<= -0.85): Chặn không cho băm vị trí sâu thêm sang trái (< cur_turns)
+      if (normalized_steer <= -limit_ratio && requested_turns < cur_turns) {
+        requested_turns = cur_turns;
       }
-      // Cận phải 85% (>= +0.85): Chặn vận tốc bẻ tiếp sang phải (> 0)
-      else if (normalized_steer >= limit_ratio && steering_velocity > 0.0) {
-        steering_velocity = 0.0;
+      // Cận phải 85% (>= +0.85): Chặn không cho băm vị trí sâu thêm sang phải (> cur_turns)
+      else if (normalized_steer >= limit_ratio && requested_turns > cur_turns) {
+        requested_turns = cur_turns;
       }
     }
 
-    for (size_t i = 0; i < wheel_count; ++i) command_interfaces_[wheel_offset + i].set_value(steering_velocity);
+    // Băm vị trí (Rate limiter) theo chu kỳ dt
+    const double dt = period.seconds() > 0.0 ? period.seconds() : 0.005;
+    const double max_step = steering_ramp_rate_turns_s_ * dt;
+    if (requested_turns > current_steering_turns_ + max_step) {
+      current_steering_turns_ += max_step;
+    } else if (requested_turns < current_steering_turns_ - max_step) {
+      current_steering_turns_ -= max_step;
+    } else {
+      current_steering_turns_ = requested_turns;
+    }
+
+    const double target_rad = current_steering_turns_ * 2.0 * M_PI;
+    for (size_t i = 0; i < wheel_count; ++i) {
+      command_interfaces_[wheel_pos_offset + i].set_value(target_rad);
+      command_interfaces_[wheel_idle_offset + i].set_value(0.0); // ClosedLoop!
+    }
 
     // 3. Logic tuần tự hóa Relay truyền động (Relay 6/7 -> Relay 8 -> Nạp ga):
     const uint8_t requested_gear = motion.gear;

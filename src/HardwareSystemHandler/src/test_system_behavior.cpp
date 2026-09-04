@@ -33,15 +33,15 @@ int main(int argc, char **argv)
     sim_state.axes[1].odrive_state_summary = AxisStateSummary::Idle;
     sim_state.relay.is_auto_mode = 1;
     sim_state.relay.is_estop_active = 0; // Normal
-    sim_state.rs485.steering_pot_percent = 50.0f;
+    sim_state.rs485.steering_pot_percent = 43.1f;
 
     HwiCommandIfBlock sim_cmd_if{};
     sim_cmd_if.axis_count = 2;
     sim_cmd_if.axes[0].interface = CommandInterface::Position;
     sim_cmd_if.axes[0].value = 0.0f;
     sim_cmd_if.axes[0].action = ControlAction::ClosedLoop;
-    sim_cmd_if.axes[1].interface = CommandInterface::Velocity;
-    sim_cmd_if.axes[1].value = 10.0f;
+    sim_cmd_if.axes[1].interface = CommandInterface::Position;
+    sim_cmd_if.axes[1].value = 0.0f;
     sim_cmd_if.axes[1].action = ControlAction::ClosedLoop;
     sim_cmd_if.rs485.throttle_voltage = 3.5f;
     sim_cmd_if.relay.relay_mask = 0xAA;
@@ -145,10 +145,11 @@ int main(int argc, char **argv)
     assert(ctrl.axes[1].desired_axis_state == AxisDesiredState::Idle && "FAILED: Wheel axis must be Idle");
     std::cout << "  [PASS] E-Stop Safety Shutdown & Brake Locking OK!\n\n";
 
-    std::cout << "[TEST 5] Testing E-Stop Latching while Steering is turned > 10%...\n";
+    std::cout << "[TEST 5] Testing E-Stop Latching while Steering is turned > 10% (from center 43.1%)...\n";
     {
         std::lock_guard<std::mutex> lock(data_mutex);
-        sim_state.relay.is_estop_active = 0; // DI7 hồi phục về bình thường nhưng góc lái lệch 22.5% (> 10%)
+        sim_state.relay.is_estop_active = 0; // DI7 hồi phục về bình thường nhưng góc lái lệch 16.9% (> 10.0%)
+        sim_state.rs485.steering_pot_percent = 60.0f; // 60.0% - 43.1% = 16.9% > 10.0%
     }
     std::this_thread::sleep_for(300ms);
 

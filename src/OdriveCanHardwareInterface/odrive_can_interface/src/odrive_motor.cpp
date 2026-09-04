@@ -97,7 +97,10 @@ bool OdriveMotor::setTarget(float value)
         break;
     case POSITION:
         cmd_id = CMD_SET_INPUT_POS;
-        data = floatToBytes(value);
+        // ODrive CAN Simple protocol: Set_Input_Pos:
+        // Bytes 0..3: Input_Pos (float), Bytes 4..5: Vel_FF (int16, 0), Bytes 6..7: Torque_FF (int16, 0)
+        data.resize(8, 0);
+        std::memcpy(data.data(), &value, sizeof(float));
         break;
     case TORQUE:
         cmd_id = CMD_SET_INPUT_TORQUE;

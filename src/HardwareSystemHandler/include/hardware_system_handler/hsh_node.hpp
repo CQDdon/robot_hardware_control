@@ -108,7 +108,7 @@ namespace hardware_system_handler
         void can1_rx_worker();
 
         float stationary_speed_threshold_kmh_{0.5f};
-        float estop_recovery_steer_ratio_{0.10f};
+        float estop_recovery_steer_deviation_{10.0f};
         bool effective_auto_mode_{false};
         bool effective_mode_initialized_{false};
     };
