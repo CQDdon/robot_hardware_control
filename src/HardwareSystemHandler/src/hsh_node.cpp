@@ -552,8 +552,6 @@ namespace hardware_system_handler
 
         const auto now = get_clock()->now();
         const size_t count = active_axis_count(state->axis_count);
-        const bool state_looks_initialized =
-            (state->axis_count > 0) || (state->sequence_id != 0) || (state->timestamp_ns != 0);
 
         auto current_state = get_fsm_state();
         if (static_cast<int>(current_state) != last_fsm_state_)
@@ -926,7 +924,25 @@ namespace hardware_system_handler
 
         // Mode switch: DI6 on CAN Relay module (1 = Auto, 0 = Manual)
         const bool raw_is_auto = have_state_snapshot_ && (last_state_.relay.is_auto_mode != 0);
-        const float cur_speed_kmh = vehicle_speed_kmh_.load(std::memory_order_relaxed);
+
+        // CAN1 speed watchdog timeout check (500ms):
+        const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const int64_t last_spd_ns = vehicle_speed_last_ns_.load(std::memory_order_relaxed);
+        float cur_speed_kmh = vehicle_speed_kmh_.load(std::memory_order_relaxed);
+        constexpr int64_t kSpeedTimeoutNs = 500000000LL; // 500ms
+        const bool speed_stale = (last_spd_ns > 0) && ((now_ns - last_spd_ns) > kSpeedTimeoutNs);
+        if (speed_stale)
+        {
+            RCLCPP_WARN_THROTTLE(logger_, *get_clock(), 2000,
+                                 "CAN1 vehicle speed telemetry stale (> 500ms). Resetting speed to 0.0 if not commanding throttle.");
+            if (current_state == FsmState::Stop || current_state == FsmState::Fault ||
+                current_state == FsmState::Ready || ctrl->rs485.throttle_voltage <= 0.01f)
+            {
+                cur_speed_kmh = 0.0f;
+                vehicle_speed_kmh_.store(0.0f, std::memory_order_relaxed);
+            }
+        }
         const bool is_stationary = (cur_speed_kmh <= stationary_speed_threshold_kmh_);
 
         if (!effective_mode_initialized_ && have_state_snapshot_)
@@ -1009,10 +1025,7 @@ namespace hardware_system_handler
             // 1. Nút E-Stop đã được nhả (is_estop_active == 0)
             const bool estop_released = have_state_snapshot_ && (last_state_.relay.is_estop_active == 0);
 
-            // 2. Xe đang tĩnh (vận tốc xấp xỉ 0)
-            const float cur_speed_kmh = vehicle_speed_kmh_.load(std::memory_order_relaxed);
-            const bool is_stationary = (cur_speed_kmh <= stationary_speed_threshold_kmh_);
-
+            // 2. Xe đang tĩnh (is_stationary đã được kiểm tra watchdog ở trên)
             // 3. Các trục ODrive online và không có lỗi nghiêm trọng chưa xóa
             const bool axes_healthy = !any_offline && !any_error;
 

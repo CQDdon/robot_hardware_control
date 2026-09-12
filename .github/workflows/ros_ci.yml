@@ -1,0 +1,80 @@
+name: ROS 2 Humble Hardware Control CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build_and_test:
+    name: Build and Test (ROS 2 Humble)
+    runs-on: ubuntu-22.04
+    container:
+      image: ros:humble-ros-base
+      options: --privileged
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools and ROS 2 dependencies
+        shell: bash
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            git \
+            iproute2 \
+            can-utils \
+            kmod \
+            python3-colcon-common-extensions \
+            ros-humble-controller-manager \
+            ros-humble-hardware-interface \
+            ros-humble-realtime-tools \
+            ros-humble-pluginlib \
+            ros-humble-rclcpp \
+            ros-humble-rclcpp-lifecycle \
+            ros-humble-ros2-control \
+            ros-humble-ros2-controllers \
+            libgtest-dev
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Setup Virtual CAN interfaces (vcan0, vcan1)
+        shell: bash
+        run: |
+          modprobe vcan || true
+          ip link add dev vcan0 type vcan || true
+          ip link set vcan0 up || true
+          ip link add dev vcan1 type vcan || true
+          ip link set vcan1 up || true
+          ip -details link show vcan0
+          ip -details link show vcan1
+
+      - name: Build packages
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          # Create a workspace layout for colcon
+          mkdir -p /ws/src
+          cp -r $GITHUB_WORKSPACE /ws/src/robot_hardware_control
+          cd /ws
+          colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Run unit & system tests
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          cd /ws
+          source install/setup.bash
+          
+          # 1. Chạy bộ Google Test của vehicle_controller
+          ./build/vehicle_controller/test_vehicle_controller_sequence
+          
+          # 2. Chạy bộ Behavioral Integration Test của HardwareSystemHandler
+          ./build/hardware_system_handler/test_system_behavior
+          
+          # 3. Chạy tổng hợp colcon test
+          colcon test --packages-select vehicle_controller hardware_system_handler
+          colcon test-result --verbose
+

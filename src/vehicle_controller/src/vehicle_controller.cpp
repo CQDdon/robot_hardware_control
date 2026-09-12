@@ -241,6 +241,16 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
   const size_t throttle_offset = relay_offset + 1;
   const size_t system_state_index = 2 * (brake_count + wheel_count);
   if (command_interfaces_.size() < throttle_offset + 1 || state_interfaces_.size() < system_state_index + 4) return controller_interface::return_type::ERROR;
+
+  const size_t wheel_state_offset = 2 * brake_count;
+  double wheel_velocity = 0.0;
+  for (size_t i = 0; i < wheel_count; ++i) {
+    wheel_velocity += state_interfaces_[wheel_state_offset + 2 * i + 1].get_value();
+  }
+  wheel_velocity /= static_cast<double>(wheel_count);
+  constexpr double kStationaryWheelVelocityThreshold = 0.1; // rad/s (~0.1 km/h)
+  const bool vehicle_stationary = (std::abs(wheel_velocity) <= kStationaryWheelVelocityThreshold);
+
   const MotionInput motion = *motion_buffer_.readFromRT();
   const FunctionInput function = *function_buffer_.readFromRT();
   const bool timed_out = is_timed_out(motion.received_ns, time) ||
@@ -285,10 +295,10 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
 
     // 2. Vị trí đánh lái (Position joint) cho motor quay bánh lái ODrive:
     double requested_turns = 0.0;
-    if (std::abs(motion.steering_angle_rad) > max_steering_angle_rad_) {
-      requested_turns = motion.steering_angle_rad / (2.0 * M_PI);
-    } else {
-      requested_turns = (motion.steering_angle_rad / max_steering_angle_rad_) * steering_max_turns_;
+    if (max_steering_angle_rad_ > 1e-6) {
+      const double clamped_angle = std::clamp(static_cast<double>(motion.steering_angle_rad),
+                                              -max_steering_angle_rad_, max_steering_angle_rad_);
+      requested_turns = (clamped_angle / max_steering_angle_rad_) * steering_max_turns_;
     }
 
     // Giới hạn trong khoảng -70.0 đến +70.0 vòng
@@ -419,7 +429,7 @@ controller_interface::return_type VehicleController::update(const rclcpp::Time &
         if (requested_gear == kNeutral) {
           drive_seq_state_ = DriveSequenceState::DISENGAGED;
           active_direction_gear_ = kNeutral;
-        } else if ((time.nanoseconds() - state_start_time_.nanoseconds()) >= deadtime_ns) {
+        } else if ((time.nanoseconds() - state_start_time_.nanoseconds()) >= deadtime_ns && vehicle_stationary) {
           active_direction_gear_ = requested_gear;
           drive_seq_state_ = DriveSequenceState::DIRECTION_ENGAGING;
           state_start_time_ = time;
@@ -479,7 +489,7 @@ void VehicleController::publish_states(const rclcpp::Time & time, const MotionIn
     out.emergency_stop = function.emergency_stop;
     out.command_timed_out = timed_out;
     out.safe_command_active = safe;
-    out.io_output_mask = safe ? 0 : static_cast<uint8_t>(state_interfaces_[system_state_index + 3].get_value());
+    out.io_output_mask = static_cast<uint8_t>(state_interfaces_[system_state_index + 3].get_value());
     system_rt_pub_->unlockAndPublish();
   }
 }

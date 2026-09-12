@@ -22,6 +22,16 @@ namespace hardware_system_handler
         explicit HshNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
         ~HshNode() override;
 
+        void set_simulated_vehicle_speed(float kmh, int64_t timestamp_ns)
+        {
+            vehicle_speed_kmh_.store(kmh, std::memory_order_relaxed);
+            vehicle_speed_last_ns_.store(timestamp_ns, std::memory_order_relaxed);
+        }
+        float get_vehicle_speed() const
+        {
+            return vehicle_speed_kmh_.load(std::memory_order_relaxed);
+        }
+
     private:
         rclcpp::Logger logger_{rclcpp::get_logger("HardwareSystemHandler")};
 

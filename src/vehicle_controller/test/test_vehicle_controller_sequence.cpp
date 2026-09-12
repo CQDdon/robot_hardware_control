@@ -103,6 +103,21 @@ protected:
     controller_->function_buffer_.writeFromNonRT(input);
   }
 
+  double current_steering_turns() const
+  {
+    return controller_->current_steering_turns_;
+  }
+
+  uint8_t system_telemetry_io_mask() const
+  {
+    return controller_->system_rt_pub_ ? controller_->system_rt_pub_->msg_.io_output_mask : 0;
+  }
+
+  bool system_telemetry_safe() const
+  {
+    return controller_->system_rt_pub_ ? controller_->system_rt_pub_->msg_.safe_command_active : false;
+  }
+
   std::unique_ptr<VehicleController> controller_;
 
   std::vector<hardware_interface::CommandInterface> cmd_interfaces_;
@@ -290,6 +305,153 @@ TEST_F(VehicleControllerTest, EmergencyStopImmediateCutoff)
   EXPECT_EQ(static_cast<uint8_t>(cmd_relay_mask_) & 0xE0, 0);
   EXPECT_EQ(static_cast<uint8_t>(cmd_relay_mask_) & 0x1F, 0x15);
   EXPECT_DOUBLE_EQ(cmd_brake_idle_, 0.0); // Engaged
+}
+
+TEST_F(VehicleControllerTest, SteeringAngleContinuityAndClamping)
+{
+  const rclcpp::Duration dt = rclcpp::Duration::from_seconds(0.01);
+  const rclcpp::Time t0(1000, 0, RCL_ROS_TIME);
+  send_function(true, t0, false, 0);
+
+  // 1. Nominal angle: 0.5 rad -> target turns = (0.5 / 1.0) * 70 = 35 turns
+  rclcpp::Time current_t = t0;
+  for (int i = 0; i < 100; ++i) {
+    current_t += dt;
+    send_function(true, current_t, false, 0);
+    send_motion(vehicle_msgs::msg::VehicleMotionCommand::GEAR_NEUTRAL, 0.0, current_t, 0.0, 0.5);
+    controller_->update(current_t, dt);
+  }
+  EXPECT_NEAR(current_steering_turns(), 35.0, 0.1);
+  EXPECT_NEAR(cmd_wheel_pos_, 35.0 * 2.0 * M_PI, 0.1 * 2.0 * M_PI);
+  EXPECT_DOUBLE_EQ(cmd_wheel_idle_, 0.0); // ClosedLoop
+
+  // 2. Full left: 1.0 rad -> reaches 70.0 turns
+  for (int i = 0; i < 100; ++i) {
+    current_t += dt;
+    send_function(true, current_t, false, 0);
+    send_motion(vehicle_msgs::msg::VehicleMotionCommand::GEAR_NEUTRAL, 0.0, current_t, 0.0, 1.0);
+    controller_->update(current_t, dt);
+  }
+  EXPECT_NEAR(current_steering_turns(), 70.0, 0.01);
+
+  // 3. CLIFF BUG CHECK: Send 1.05 rad (> 1.0 rad).
+  // Target MUST remain clamped at 70.0 turns, NOT collapse to 0.16 turns!
+  for (int i = 0; i < 20; ++i) {
+    current_t += dt;
+    send_function(true, current_t, false, 0);
+    send_motion(vehicle_msgs::msg::VehicleMotionCommand::GEAR_NEUTRAL, 0.0, current_t, 0.0, 1.05);
+    controller_->update(current_t, dt);
+  }
+  EXPECT_NEAR(current_steering_turns(), 70.0, 0.01);
+  EXPECT_NEAR(cmd_wheel_pos_, 70.0 * 2.0 * M_PI, 0.01);
+
+  // 4. Reverse direction: -1.5 rad (clamped at -70.0 turns)
+  for (int i = 0; i < 450; ++i) {
+    current_t += dt;
+    send_function(true, current_t, false, 0);
+    send_motion(vehicle_msgs::msg::VehicleMotionCommand::GEAR_NEUTRAL, 0.0, current_t, 0.0, -1.5);
+    controller_->update(current_t, dt);
+  }
+  EXPECT_NEAR(current_steering_turns(), -70.0, 0.01);
+  EXPECT_NEAR(cmd_wheel_pos_, -70.0 * 2.0 * M_PI, 0.01);
+}
+
+TEST_F(VehicleControllerTest, GearShiftSpeedInterlock)
+{
+  const rclcpp::Duration dt = rclcpp::Duration::from_seconds(0.005);
+
+  // Bring to RUNNING in Forward (Drive)
+  const rclcpp::Time t0(1000, 0, RCL_ROS_TIME);
+  const rclcpp::Time t100(1000, 100'000'000, RCL_ROS_TIME);
+  const rclcpp::Time t200(1000, 200'000'000, RCL_ROS_TIME);
+  send_function(true, t0, false, 0);
+  send_motion(vehicle_msgs::msg::VehicleMotionCommand::GEAR_DRIVE, 40.0, t0);
+  controller_->update(t0, dt);
+  send_function(true, t100, false, 0);
+  send_motion(vehicle_msgs::msg::VehicleMotionCommand::GEAR_DRIVE, 40.0, t100);
+  controller_->update(t100, dt);
+  send_function(true, t200, false, 0);
+  send_motion(vehicle_msgs::msg::VehicleMotionCommand::GEAR_DRIVE, 40.0, t200);
+  controller_->update(t200, dt);
+  EXPECT_EQ(static_cast<uint8_t>(cmd_relay_mask_) & 0xE0, 0xA0); // Forward + Main
+
+  // Simulate vehicle moving at 2.5 rad/s wheel speed
+  state_wheel_vel_ = 2.5;
+
+  // Driver shifts to REVERSE at t = 300ms
+  const rclcpp::Time t300(1000, 300'000'000, RCL_ROS_TIME);
+  send_function(true, t300, false, 0);
+  send_motion(vehicle_msgs::msg::VehicleMotionCommand::GEAR_REVERSE, 50.0, t300);
+  controller_->update(t300, dt);
+
+  // Disengaging: relays off, throttle 0
+  EXPECT_EQ(static_cast<uint8_t>(cmd_relay_mask_) & 0xE0, 0x00);
+  EXPECT_DOUBLE_EQ(cmd_throttle_voltage_, 0.0);
+
+  // Advance time past deadtime_ms (100ms) to t = 450ms, but wheel is STILL moving!
+  const rclcpp::Time t450(1000, 450'000'000, RCL_ROS_TIME);
+  send_function(true, t450, false, 0);
+  send_motion(vehicle_msgs::msg::VehicleMotionCommand::GEAR_REVERSE, 50.0, t450);
+  controller_->update(t450, dt);
+
+  // Interlock active: reverse relay MUST NOT engage while wheel is rolling!
+  EXPECT_EQ(static_cast<uint8_t>(cmd_relay_mask_) & 0xE0, 0x00);
+  EXPECT_DOUBLE_EQ(cmd_throttle_voltage_, 0.0);
+
+  // Now vehicle stops (wheel speed drops below threshold <= 0.1 rad/s)
+  state_wheel_vel_ = 0.0;
+  const rclcpp::Time t455(1000, 455'000'000, RCL_ROS_TIME);
+  send_function(true, t455, false, 0);
+  send_motion(vehicle_msgs::msg::VehicleMotionCommand::GEAR_REVERSE, 50.0, t455);
+  controller_->update(t455, dt);
+
+  // Direction delay starts now! Relay 7 (Reverse: 0x40) engages!
+  EXPECT_EQ(static_cast<uint8_t>(cmd_relay_mask_) & 0xE0, 0x40);
+  EXPECT_DOUBLE_EQ(cmd_throttle_voltage_, 0.0);
+}
+
+TEST_F(VehicleControllerTest, AuxRelayStateTelemetryIntegrity)
+{
+  const rclcpp::Duration dt = rclcpp::Duration::from_seconds(0.005);
+  const rclcpp::Time t0(1000, 0, RCL_ROS_TIME);
+
+  // In safe mode (motion disabled, aux relays active: headlights 0x01, horn 0x04 -> 0x05)
+  state_relay_mask_ = 0x05;
+  send_function(false, t0, false, 0x05); // safe mode because motion_enable = false
+
+  EXPECT_EQ(controller_->update(t0, dt), controller_interface::return_type::OK);
+  EXPECT_EQ(static_cast<uint8_t>(cmd_relay_mask_) & 0x1F, 0x05);
+
+  // Verify telemetry state: io_output_mask must accurately reflect hardware relay state (0x05), NOT 0!
+  EXPECT_EQ(system_telemetry_io_mask(), 0x05);
+  EXPECT_TRUE(system_telemetry_safe());
+}
+
+TEST_F(VehicleControllerTest, SteeringPotentiometerSoftLimiter)
+{
+  const rclcpp::Duration dt = rclcpp::Duration::from_seconds(0.01);
+  const rclcpp::Time t0(1000, 0, RCL_ROS_TIME);
+  send_function(true, t0, false, 0);
+
+  // Center pot: 43.1%. Right bound 85% is 43.1 + 0.85 * 30.6 = 69.11%.
+  // Set pot to 70.0% (exceeding +85% right limit)
+  state_steering_pot_ = 70.0;
+  state_wheel_pos_ = 0.0;
+
+  // Requesting positive turns (right) should be blocked by soft limiter
+  send_motion(vehicle_msgs::msg::VehicleMotionCommand::GEAR_NEUTRAL, 0.0, t0, 0.0, 0.5);
+  controller_->update(t0, dt);
+  EXPECT_NEAR(current_steering_turns(), 0.0, 1e-4);
+
+  // But requesting negative turns (steering back left away from limit) should be permitted!
+  rclcpp::Time t1(1000, 50'000'000, RCL_ROS_TIME);
+  for (int i = 0; i < 10; ++i) {
+    t1 += dt;
+    send_function(true, t1, false, 0);
+    send_motion(vehicle_msgs::msg::VehicleMotionCommand::GEAR_NEUTRAL, 0.0, t1, 0.0, -0.5);
+    controller_->update(t1, dt);
+  }
+  EXPECT_LT(current_steering_turns(), 0.0);
 }
 
 }  // namespace vehicle_controller

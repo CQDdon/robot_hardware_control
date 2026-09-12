@@ -217,8 +217,46 @@ int main(int argc, char **argv)
     assert(ctrl.motion_enable == 1 && "FAILED: Switching to AUTO resumes RUNNING");
     std::cout << "  [PASS] E-Stop in MANUAL mode recovery OK!\n\n";
 
+    std::cout << "[TEST 8] Testing CAN1 Speed Watchdog Timeout & Fallback...\n";
+    {
+        // 1. Gửi vận tốc 15 km/h với timestamp hiện tại
+        const auto t_speed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        node->set_simulated_vehicle_speed(15.0f, t_speed);
+
+        // Đợi 50ms (chưa quá 500ms timeout)
+        std::this_thread::sleep_for(50ms);
+
+        // Thử chuyển chế độ sang MANUAL khi xe đang chạy 15 km/h -> Phải bị REJECT
+        {
+            std::lock_guard<std::mutex> lock(data_mutex);
+            sim_state.relay.is_auto_mode = 0;
+        }
+        std::this_thread::sleep_for(200ms);
+        std::cout << "  -> Mode switch while moving: vehicle speed = " << node->get_vehicle_speed() << " km/h\n";
+
+        // 2. Mô phỏng đứt cáp CAN1 (> 500ms timeout) và xe đã nhả ga (throttle = 0V)
+        {
+            std::lock_guard<std::mutex> lock(data_mutex);
+            sim_cmd_if.rs485.throttle_voltage = 0.0f;
+        }
+        // Đợi 600ms để watchdog kích hoạt timeout
+        std::this_thread::sleep_for(600ms);
+
+        // Sau khi timeout và throttle = 0V, speed phải tự động fallback về 0.0 km/h
+        const float fallback_speed = node->get_vehicle_speed();
+        std::cout << "  -> After 600ms CAN1 timeout: vehicle speed fallback = " << fallback_speed << " km/h\n";
+        assert(fallback_speed <= 0.01f && "FAILED: Watchdog must reset stale speed to 0.0 km/h");
+
+        // Giờ xe đã tĩnh, chuyển sang MANUAL phải được chấp thuận
+        std::this_thread::sleep_for(200ms);
+        shm.read_control(ctrl);
+        assert(ctrl.motion_enable == 0 && "FAILED: Mode switch to MANUAL should now succeed after speed fallback");
+        std::cout << "  [PASS] CAN1 Speed Watchdog Timeout & Fallback OK!\n\n";
+    }
+
     std::cout << "====================================================\n";
-    std::cout << " ALL 7 BEHAVIORAL VERIFICATION TESTS PASSED (100%)! \n";
+    std::cout << " ALL 8 BEHAVIORAL VERIFICATION TESTS PASSED (100%)! \n";
     std::cout << "====================================================\n";
 
     ticker_running.store(false);
