@@ -145,35 +145,80 @@ int main(int argc, char **argv)
     assert(ctrl.axes[1].desired_axis_state == AxisDesiredState::Idle && "FAILED: Wheel axis must be Idle");
     std::cout << "  [PASS] E-Stop Safety Shutdown & Brake Locking OK!\n\n";
 
-    std::cout << "[TEST 5] Testing E-Stop Latching while Steering is turned > 10% (from center 43.1%)...\n";
+    std::cout << "[TEST 5] Testing E-Stop released while in AUTO mode (requires MANUAL switch first)...\n";
     {
         std::lock_guard<std::mutex> lock(data_mutex);
-        sim_state.relay.is_estop_active = 0; // DI7 hồi phục về bình thường nhưng góc lái lệch 16.9% (> 10.0%)
-        sim_state.rs485.steering_pot_percent = 60.0f; // 60.0% - 43.1% = 16.9% > 10.0%
+        sim_state.relay.is_estop_active = 0; // DI7 hồi phục về bình thường nhưng vẫn đang ở AUTO (DI6=1)
+        sim_state.rs485.steering_pot_percent = 60.0f; // Vô lăng không cần căn tâm (không auto xoay vô lăng)
     }
     std::this_thread::sleep_for(300ms);
 
     shm.read_control(ctrl);
-    assert(ctrl.motion_enable == 0 && "FAILED: STOP state must remain latched while steering is turned > 10%");
+    assert(ctrl.motion_enable == 0 && "FAILED: STOP state must remain latched while still in AUTO after E-Stop");
     assert(ctrl.rs485.throttle_voltage == 0.0f && "FAILED: throttle must remain locked");
-    std::cout << "  [PASS] STOP State Latch when Steering Turned OK!\n\n";
+    std::cout << "  [PASS] E-Stop Recovery in AUTO blocked until MANUAL switch! OK!\n\n";
 
-    std::cout << "[TEST 6] Testing E-Stop Recovery (Vehicle stationary + Steering centered <= 10%)...\n";
+    std::cout << "[TEST 6] Testing Mode Cycle (Switch to MANUAL -> normal operation, then back to AUTO to resume)...\n";
     {
         std::lock_guard<std::mutex> lock(data_mutex);
-        sim_state.relay.is_estop_active = 0; // DI7 released
-        sim_state.rs485.steering_pot_percent = 43.1f; // Vô lăng trả về thẳng lái (43.1% trung tâm)
+        sim_state.relay.is_auto_mode = 0; // Người dùng chuyển công tắc sang MANUAL (DI6=0)
     }
     std::this_thread::sleep_for(400ms);
 
     shm.read_control(ctrl);
-    std::cout << "  -> After centering steering: motion_enable = " << (int)ctrl.motion_enable
+    std::cout << "  -> In MANUAL mode: motion_enable = " << (int)ctrl.motion_enable
               << ", throttle_voltage = " << ctrl.rs485.throttle_voltage << " V\n";
-    assert(ctrl.motion_enable == 1 && "FAILED: FSM must recover from STOP to READY/RUNNING when steering centered");
-    std::cout << "  [PASS] E-Stop Recovery when Centered OK!\n\n";
+    assert(ctrl.motion_enable == 0 && "FAILED: In MANUAL mode motion_enable must be 0 (normal manual operation)");
+    std::cout << "  [PASS] Recovered to MANUAL mode normally!\n";
+
+    {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        sim_state.relay.is_auto_mode = 1; // Người dùng chuyển ngược lại AUTO (DI6=1)
+    }
+    std::this_thread::sleep_for(400ms);
+
+    shm.read_control(ctrl);
+    std::cout << "  -> After switching back to AUTO: motion_enable = " << (int)ctrl.motion_enable
+              << ", throttle_voltage = " << ctrl.rs485.throttle_voltage << " V\n";
+    assert(ctrl.motion_enable == 1 && "FAILED: FSM must resume to RUNNING in AUTO mode");
+    assert(std::abs(ctrl.rs485.throttle_voltage - 3.5f) < 0.1f && "FAILED: throttle_voltage must be restored");
+    std::cout << "  [PASS] Mode Cycled MANUAL -> AUTO: Auto Resumed OK!\n\n";
+
+    std::cout << "[TEST 7] Testing E-Stop in MANUAL mode (recovers normally without toggling)...\n";
+    {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        sim_state.relay.is_auto_mode = 0; // Chuyển sang MANUAL
+    }
+    std::this_thread::sleep_for(300ms);
+
+    {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        sim_state.relay.is_estop_active = 1; // Kích hoạt E-Stop khi đang ở MANUAL
+    }
+    std::this_thread::sleep_for(400ms);
+    shm.read_control(ctrl);
+    assert(ctrl.motion_enable == 0);
+
+    {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        sim_state.relay.is_estop_active = 0; // Nhả E-Stop khi đang ở MANUAL
+    }
+    std::this_thread::sleep_for(400ms);
+    shm.read_control(ctrl);
+    assert(ctrl.motion_enable == 0 && "FAILED: Must recover to MANUAL mode (motion_enable 0)");
+    std::cout << "  -> In MANUAL mode: recovered normally from E-Stop\n";
+
+    {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        sim_state.relay.is_auto_mode = 1; // Chuyển sang AUTO
+    }
+    std::this_thread::sleep_for(400ms);
+    shm.read_control(ctrl);
+    assert(ctrl.motion_enable == 1 && "FAILED: Switching to AUTO resumes RUNNING");
+    std::cout << "  [PASS] E-Stop in MANUAL mode recovery OK!\n\n";
 
     std::cout << "====================================================\n";
-    std::cout << " ALL 6 BEHAVIORAL VERIFICATION TESTS PASSED (100%)! \n";
+    std::cout << " ALL 7 BEHAVIORAL VERIFICATION TESTS PASSED (100%)! \n";
     std::cout << "====================================================\n";
 
     ticker_running.store(false);

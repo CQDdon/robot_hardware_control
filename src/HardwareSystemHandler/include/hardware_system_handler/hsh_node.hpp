@@ -111,6 +111,7 @@ namespace hardware_system_handler
         float estop_recovery_steer_deviation_{10.0f};
         bool effective_auto_mode_{false};
         bool effective_mode_initialized_{false};
+        bool estop_cycle_saw_manual_{false};
     };
 
 } // namespace hardware_system_handler

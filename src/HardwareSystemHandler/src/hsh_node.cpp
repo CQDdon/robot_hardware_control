@@ -744,6 +744,8 @@ namespace hardware_system_handler
             RCLCPP_ERROR_THROTTLE(logger_, *get_clock(), 500,
                                   "E-Stop switch active detected on CAN Relay DI7! Dispatching EvCriticalError to STOP.");
             log_event("EvCriticalError (E-Stop DI7)");
+            const bool raw_is_auto_now = (last_state_.relay.is_auto_mode != 0);
+            estop_cycle_saw_manual_ = !raw_is_auto_now;
             HardwareSystemHandler::dispatch(EvCriticalError{});
             current_state = get_fsm_state();
         }
@@ -1011,13 +1013,7 @@ namespace hardware_system_handler
             const float cur_speed_kmh = vehicle_speed_kmh_.load(std::memory_order_relaxed);
             const bool is_stationary = (cur_speed_kmh <= stationary_speed_threshold_kmh_);
 
-            // 3. Góc lái nằm trong khoảng lệch <= 10.0% so với tâm 43.1% (tức pot in [33.1%, 53.1%])
-            const float pot_pct = have_state_snapshot_ ? last_state_.rs485.steering_pot_percent : 43.1f;
-            constexpr float kPotCenter = 43.1f;
-            const float pot_deviation = std::abs(pot_pct - kPotCenter);
-            const bool steer_centered = (pot_deviation <= estop_recovery_steer_deviation_);
-
-            // 4. Các trục ODrive online và không có lỗi nghiêm trọng chưa xóa
+            // 3. Các trục ODrive online và không có lỗi nghiêm trọng chưa xóa
             const bool axes_healthy = !any_offline && !any_error;
 
             if (estop_released)
@@ -1041,28 +1037,61 @@ namespace hardware_system_handler
                 }
             }
 
-            if (estop_released && is_stationary && steer_centered && axes_healthy)
+            // Ghi nhận nếu công tắc đang ở MANUAL hoặc vừa được chuyển về MANUAL
+            if (have_state_snapshot_ && !raw_is_auto)
             {
-                RCLCPP_INFO(logger_, "E-Stop recovery conditions met: E-Stop released, vehicle stationary (%.2f km/h <= %.2f km/h), steering centered (pot: %.1f%%, dev: %.1f%% <= %.1f%%). Transitioning STOP -> READY.",
-                            cur_speed_kmh, stationary_speed_threshold_kmh_, pot_pct, pot_deviation, estop_recovery_steer_deviation_);
-                log_event("EvEStopReset (E-Stop Cleared)");
-                estop_brake_latched_ = false;
-                for (size_t i = 0; i < SHM_MAX_AXES; ++i) {
-                    brake_reference_valid_[i] = false;
-                }
-                HardwareSystemHandler::dispatch(EvEStopReset{});
-                current_state = get_fsm_state();
-                return;
+                estop_cycle_saw_manual_ = true;
             }
 
-            if (estop_released)
+            if (estop_released && is_stationary && axes_healthy)
+            {
+                if (!raw_is_auto)
+                {
+                    // Đang ở chế độ MANUAL: Phục hồi hoạt động bình thường
+                    RCLCPP_INFO(logger_,
+                                "E-Stop recovery conditions met in MANUAL mode (vehicle stationary: %.2f km/h <= %.2f km/h). Transitioning STOP -> READY.",
+                                cur_speed_kmh, stationary_speed_threshold_kmh_);
+                    log_event("EvEStopReset (E-Stop Cleared - Manual)");
+                    estop_brake_latched_ = false;
+                    for (size_t i = 0; i < SHM_MAX_AXES; ++i) {
+                        brake_reference_valid_[i] = false;
+                    }
+                    HardwareSystemHandler::dispatch(EvEStopReset{});
+                    current_state = get_fsm_state();
+                    return;
+                }
+                else if (estop_cycle_saw_manual_)
+                {
+                    // Đang ở chế độ AUTO và người dùng đã gạt qua MANUAL rồi gạt lại AUTO: Tiếp tục hoạt động AUTO
+                    RCLCPP_INFO(logger_,
+                                "E-Stop recovery conditions met: Mode cycled MANUAL -> AUTO (vehicle stationary: %.2f km/h <= %.2f km/h). Transitioning STOP -> READY.",
+                                cur_speed_kmh, stationary_speed_threshold_kmh_);
+                    log_event("EvEStopReset (E-Stop Cleared - Auto Resumed)");
+                    estop_brake_latched_ = false;
+                    estop_cycle_saw_manual_ = false;
+                    for (size_t i = 0; i < SHM_MAX_AXES; ++i) {
+                        brake_reference_valid_[i] = false;
+                    }
+                    HardwareSystemHandler::dispatch(EvEStopReset{});
+                    current_state = get_fsm_state();
+                    return;
+                }
+                else
+                {
+                    // Đang ở chế độ AUTO nhưng chưa gạt về MANUAL: Giữ nguyên STOP và yêu cầu thao tác gạt công tắc
+                    RCLCPP_WARN_THROTTLE(
+                        logger_, *get_clock(), 1000,
+                        "E-Stop đã nhả nhưng xe đang ở chế độ AUTO. Yêu cầu chuyển công tắc về MANUAL (DI6=0), sau đó chuyển ngược về AUTO (DI6=1) để tiếp tục.");
+                }
+            }
+
+            if (estop_released && (!is_stationary || !axes_healthy))
             {
                 RCLCPP_WARN_THROTTLE(
                     logger_, *get_clock(), 1000,
                     "E-Stop da nha nhung chua du dieu kien phuc hoi: Van toc=%.2f km/h (yeu cau <= %.2f), "
-                    "Goc lai=%.1f%% (lech %.1f%% so voi tam 43.1%%, yeu cau <= %.1f%%), Truc ODrive san sang=%d (error=%d, offline=%d)",
+                    "Truc ODrive san sang=%d (error=%d, offline=%d)",
                     cur_speed_kmh, stationary_speed_threshold_kmh_,
-                    pot_pct, pot_deviation, estop_recovery_steer_deviation_,
                     axes_healthy, any_error, any_offline);
             }
 
