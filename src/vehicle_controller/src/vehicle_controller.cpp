@@ -198,7 +198,7 @@ void VehicleController::set_position_command(double position_percentage, bool fo
   }
 }
 
-void VehicleController::write_safe_command(uint8_t aux_mask)
+// void VehicleController::write_safe_command(uint8_t aux_mask)
 {
   const size_t brake_count = brake_joints_.size();
   const size_t wheel_count = wheel_joints_.size();
