@@ -54,6 +54,8 @@ protected:
     state_interfaces_.emplace_back("system", "motion_allowed", &state_motion_allowed_);
     state_interfaces_.emplace_back("relay", "relay_mask", &state_relay_mask_);
     state_interfaces_.emplace_back("rs485", "steering_pot_percent", &state_steering_pot_);
+    state_interfaces_.emplace_back("system", "vehicle_speed_mps", &state_vehicle_speed_mps_);
+    state_interfaces_.emplace_back("system", "battery_voltage", &state_battery_voltage_);
 
     std::vector<hardware_interface::LoanedCommandInterface> loaned_cmds;
     for (auto & iface : cmd_interfaces_) {
@@ -139,6 +141,8 @@ protected:
   double state_motion_allowed_{1.0};
   double state_relay_mask_{0.0};
   double state_steering_pot_{50.0};
+  double state_vehicle_speed_mps_{0.0};
+  double state_battery_voltage_{48.0};
 };
 
 TEST_F(VehicleControllerTest, SafeStateGating)

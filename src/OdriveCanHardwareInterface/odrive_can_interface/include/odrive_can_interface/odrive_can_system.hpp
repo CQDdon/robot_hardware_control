@@ -82,6 +82,8 @@ namespace odrive_can_interface
         double hardware_online_{0.0};
         double hardware_fault_{1.0};
         double motion_allowed_{0.0};
+        double vehicle_speed_mps_{0.0};
+        double battery_voltage_{0.0};
 
         std::vector<OdriveMotor::ControlMode> joint_mode_;
         std::vector<double> command_pos_;

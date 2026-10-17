@@ -69,7 +69,11 @@ controller_interface::InterfaceConfiguration VehicleController::state_interface_
     config.names.push_back(joint + "/position");
     config.names.push_back(joint + "/velocity");
   }
-  config.names.insert(config.names.end(), {"system/online", "system/fault", "system/motion_allowed", "relay/relay_mask", "rs485/steering_pot_percent"});
+  config.names.insert(config.names.end(), {
+    "system/online", "system/fault", "system/motion_allowed",
+    "relay/relay_mask", "rs485/steering_pot_percent",
+    "system/vehicle_speed_mps", "system/battery_voltage"
+  });
   return config;
 }
 
@@ -455,7 +459,10 @@ void VehicleController::publish_states(const rclcpp::Time & time, const MotionIn
   const size_t system_state_index = 2 * (brake_count + wheel_count);
   double wheel_velocity = 0.0;
   for (size_t i = 0; i < wheel_count; ++i) wheel_velocity += state_interfaces_[wheel_state_offset + 2 * i + 1].get_value();
-  wheel_velocity /= static_cast<double>(wheel_count);
+  const bool has_telemetry = state_interfaces_.size() >= system_state_index + 7;
+  const float vehicle_speed_mps = has_telemetry ? static_cast<float>(state_interfaces_[system_state_index + 5].get_value()) : 0.0F;
+  const float battery_voltage = has_telemetry ? static_cast<float>(state_interfaces_[system_state_index + 6].get_value()) : 0.0F;
+
   if (motion_rt_pub_ && motion_rt_pub_->trylock()) {
     const bool has_steering_pot = state_interfaces_.size() >= system_state_index + 5;
     const float steering_pot_pct = has_steering_pot ? static_cast<float>(state_interfaces_[system_state_index + 4].get_value()) : 0.0F;
@@ -470,7 +477,9 @@ void VehicleController::publish_states(const rclcpp::Time & time, const MotionIn
     auto & out = motion_rt_pub_->msg_;
     out.header.stamp = time;
     out.steering_angle_rad = steering_angle;
-    out.wheel_velocity_rad_s = static_cast<float>(wheel_velocity);
+    out.wheel_velocity_rad_s = vehicle_speed_mps;
+    out.vehicle_speed_mps = vehicle_speed_mps;
+    out.battery_voltage = battery_voltage;
     const bool throttle_active = !safe && (drive_seq_state_ == DriveSequenceState::RUNNING);
     out.speed_percentage = throttle_active ? static_cast<float>(motion.speed_percentage) : 0.0F;
     out.brake_percentage = safe ?
@@ -490,6 +499,7 @@ void VehicleController::publish_states(const rclcpp::Time & time, const MotionIn
     out.command_timed_out = timed_out;
     out.safe_command_active = safe;
     out.io_output_mask = static_cast<uint8_t>(state_interfaces_[system_state_index + 3].get_value());
+    out.battery_voltage = battery_voltage;
     system_rt_pub_->unlockAndPublish();
   }
 }

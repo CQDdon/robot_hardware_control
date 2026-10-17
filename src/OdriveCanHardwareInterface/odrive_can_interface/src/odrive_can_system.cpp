@@ -129,10 +129,11 @@ namespace odrive_can_interface
       out.emplace_back(jn, hardware_interface::HW_IF_POSITION, &position_[i]);
       out.emplace_back(jn, hardware_interface::HW_IF_VELOCITY, &velocity_[i]);
     }
-    // Derived from existing CAN/SHM state. These are read-only safety signals.
     out.emplace_back("system", "online", &hardware_online_);
     out.emplace_back("system", "fault", &hardware_fault_);
     out.emplace_back("system", "motion_allowed", &motion_allowed_);
+    out.emplace_back("system", "vehicle_speed_mps", &vehicle_speed_mps_);
+    out.emplace_back("system", "battery_voltage", &battery_voltage_);
     return out;
   }
 
@@ -324,6 +325,11 @@ namespace odrive_can_interface
     motion_allowed_ = 0.0;
     HwiStateBlock state{};
     HshControlBlock control{};
+    if (shmitf_.read_control(control))
+    {
+      vehicle_speed_mps_ = static_cast<double>(control.vehicle_speed_mps);
+      battery_voltage_ = static_cast<double>(control.battery_voltage);
+    }
     if (shmitf_.read_state(state) && state.axis_count >= info_.joints.size())
     {
       bool all_online = true;

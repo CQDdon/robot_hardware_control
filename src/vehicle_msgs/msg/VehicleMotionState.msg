@@ -8,3 +8,5 @@ uint8 GEAR_DRIVE=1
 uint8 GEAR_REVERSE=2
 uint8 gear
 bool safe_command_active
+float32 vehicle_speed_mps
+float32 battery_voltage

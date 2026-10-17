@@ -368,13 +368,18 @@ struct HshControlBlock
     uint8_t motion_enable;
     SafetyAction safety_action;
     uint8_t debug_enable;
+    float vehicle_speed_mps;
+    float vehicle_speed_kmh;
+    float battery_voltage;
     AxisControl axes[SHM_MAX_AXES];
     Rs485CommandBlock rs485;
     RelayCommandBlock relay;
 
     HshControlBlock()
         : sequence_id(0), timestamp_ns(0), axis_count(0), motion_enable(0),
-          safety_action(SafetyAction::None), debug_enable(0), rs485(), relay()
+          safety_action(SafetyAction::None), debug_enable(0),
+          vehicle_speed_mps(0.0f), vehicle_speed_kmh(0.0f), battery_voltage(0.0f),
+          rs485(), relay()
     {
         for (auto &axis : axes)
         {

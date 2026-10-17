@@ -1186,6 +1186,9 @@ namespace hardware_system_handler
             desired_control_.motion_enable = false;
             desired_control_.timestamp_ns = static_cast<uint64_t>(get_clock()->now().nanoseconds());
             desired_control_.sequence_id += 1;
+            desired_control_.vehicle_speed_kmh = vehicle_speed_kmh_.load(std::memory_order_relaxed);
+            desired_control_.vehicle_speed_mps = desired_control_.vehicle_speed_kmh / 3.6f;
+            desired_control_.battery_voltage = vehicle_battery_v_.load(std::memory_order_relaxed);
             for (size_t i = 0; i < SHM_MAX_AXES; ++i)
             {
                 request_axis_state(i, AxisDesiredState::Idle);
@@ -1207,6 +1210,10 @@ namespace hardware_system_handler
         ctrl->axis_count = static_cast<uint8_t>(count);
         ctrl->timestamp_ns = static_cast<uint64_t>(get_clock()->now().nanoseconds());
         ctrl->sequence_id += 1;
+        const float spd_kmh = vehicle_speed_kmh_.load(std::memory_order_relaxed);
+        ctrl->vehicle_speed_kmh = spd_kmh;
+        ctrl->vehicle_speed_mps = spd_kmh / 3.6f;
+        ctrl->battery_voltage = vehicle_battery_v_.load(std::memory_order_relaxed);
 
         const auto current_state = get_fsm_state();
         if (current_state == FsmState::Stop)
