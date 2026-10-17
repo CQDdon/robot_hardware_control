@@ -438,16 +438,24 @@ namespace hardware_system_handler
         bool sent = false;
         for (size_t i = 0; i < count; ++i)
         {
-            if (i != 0 || cmd_if->axes[i].interface != CommandInterface::Position)
-                continue;
-            if (homing_command_sent_[i] || homing_done_[i])
-                continue;
-            request_axis_state(i, AxisDesiredState::Homing);
-            ctrl->axes[i].motion_enable = false;
-            ctrl->axes[i].target = 0.0f;
-            homing_command_sent_[i] = true;
-            homing_command_time_ns_[i] = now.nanoseconds();
-            sent = true;
+            if (i == 0 && cmd_if->axes[i].interface == CommandInterface::Position)
+            {
+                if (homing_command_sent_[i] || homing_done_[i])
+                    continue;
+                request_axis_state(i, AxisDesiredState::Homing);
+                ctrl->axes[i].control_mode = CommandInterface::Position;
+                ctrl->axes[i].motion_enable = false;
+                ctrl->axes[i].target = 0.0f;
+                homing_command_sent_[i] = true;
+                homing_command_time_ns_[i] = now.nanoseconds();
+                sent = true;
+            }
+            else
+            {
+                request_axis_state(i, AxisDesiredState::Idle);
+                ctrl->axes[i].motion_enable = false;
+                ctrl->axes[i].target = 0.0f;
+            }
         }
 
         if (sent)
@@ -567,6 +575,12 @@ namespace hardware_system_handler
             {
                 wait_homing_start_ = now;
                 homing_timeout_sent_ = false;
+                homing_required_ = !bypass_position_homing_;
+                homing_in_progress_ = false;
+                homing_command_sent_.fill(false);
+                homing_started_.fill(false);
+                homing_done_.fill(false);
+                homing_command_time_ns_.fill(0);
             }
             if (current_state == FsmState::Fault)
             {
@@ -914,7 +928,7 @@ namespace hardware_system_handler
             }
             log_event("EvHomingDone");
             HardwareSystemHandler::dispatch(EvHomingDone{});
-            ctrl->motion_enable = true;
+            ctrl->motion_enable = false;
             homing_required_ = false;
             homing_in_progress_ = false;
             homing_command_sent_.fill(false);
@@ -1062,7 +1076,7 @@ namespace hardware_system_handler
                 {
                     // Đang ở chế độ MANUAL: Phục hồi hoạt động bình thường
                     RCLCPP_INFO(logger_,
-                                "E-Stop recovery conditions met in MANUAL mode (vehicle stationary: %.2f km/h <= %.2f km/h). Transitioning STOP -> READY.",
+                                "E-Stop recovery conditions met in MANUAL mode (vehicle stationary: %.2f km/h <= %.2f km/h). Transitioning STOP -> WAIT_HOMING.",
                                 cur_speed_kmh, stationary_speed_threshold_kmh_);
                     log_event("EvEStopReset (E-Stop Cleared - Manual)");
                     estop_brake_latched_ = false;
@@ -1077,7 +1091,7 @@ namespace hardware_system_handler
                 {
                     // Đang ở chế độ AUTO và người dùng đã gạt qua MANUAL rồi gạt lại AUTO: Tiếp tục hoạt động AUTO
                     RCLCPP_INFO(logger_,
-                                "E-Stop recovery conditions met: Mode cycled MANUAL -> AUTO (vehicle stationary: %.2f km/h <= %.2f km/h). Transitioning STOP -> READY.",
+                                "E-Stop recovery conditions met: Mode cycled MANUAL -> AUTO (vehicle stationary: %.2f km/h <= %.2f km/h). Transitioning STOP -> WAIT_HOMING.",
                                 cur_speed_kmh, stationary_speed_threshold_kmh_);
                     log_event("EvEStopReset (E-Stop Cleared - Auto Resumed)");
                     estop_brake_latched_ = false;
@@ -1120,14 +1134,8 @@ namespace hardware_system_handler
                     const bool is_brake_axis = (i == 0);
                     if (is_brake_axis)
                     {
-                        const float cur_turns = state->axes[i].position / (2.0f * 3.141592f);
-                        if (!brake_reference_valid_[i])
-                        {
-                            brake_reference_turns_[i] = cur_turns;
-                            brake_reference_valid_[i] = true;
-                        }
-                        // Chốt target 100% phanh = Vị trí gốc nhả phanh + 3.0 vòng
-                        estop_brake_target_[i] = brake_reference_turns_[i] + 3.0f;
+                        // Target phanh tuyệt đối 100% khi E-Stop = 3.0 vòng từ mốc Homing
+                        estop_brake_target_[i] = 3.0f;
                     }
                     else
                     {
@@ -1222,13 +1230,8 @@ namespace hardware_system_handler
                     const bool is_brake_axis = (i == 0);
                     if (is_brake_axis)
                     {
-                        const float cur_turns = state->axes[i].position / (2.0f * 3.141592f);
-                        if (!brake_reference_valid_[i])
-                        {
-                            brake_reference_turns_[i] = cur_turns;
-                            brake_reference_valid_[i] = true;
-                        }
-                        estop_brake_target_[i] = brake_reference_turns_[i] + 3.0f;
+                        // Target phanh tuyệt đối 100% khi E-Stop = 3.0 vòng từ mốc Homing
+                        estop_brake_target_[i] = 3.0f;
                     }
                     else
                     {
@@ -1264,6 +1267,33 @@ namespace hardware_system_handler
             return;
         }
 
+        if (current_state == FsmState::WaitHoming)
+        {
+            ctrl->motion_enable = false;
+            ctrl->rs485.throttle_voltage = 0.0f;
+            ctrl->relay.relay_mask = 0x00;
+
+            for (size_t i = 0; i < count; ++i)
+            {
+                const bool is_brake_axis = (i == 0);
+                if (is_brake_axis && homing_required_ && !homing_done_[i])
+                {
+                    request_axis_state(i, AxisDesiredState::Homing);
+                    ctrl->axes[i].control_mode = CommandInterface::Position;
+                    ctrl->axes[i].motion_enable = false;
+                    ctrl->axes[i].target = 0.0f;
+                }
+                else
+                {
+                    request_axis_state(i, AxisDesiredState::Idle);
+                    ctrl->axes[i].motion_enable = false;
+                    ctrl->axes[i].target = 0.0f;
+                }
+            }
+            (void)shmitf_.write_control(desired_control_);
+            return;
+        }
+
         if (!HshNode::CommandVerify())
         {
             return;
@@ -1277,12 +1307,6 @@ namespace hardware_system_handler
             ctrl->axes[i].control_mode = interface;
             if (cmd_if->axes[i].action == ControlAction::Idle)
             {
-                if (is_brake_axis)
-                {
-                    // Khi đang nhả phanh (Idle), liên tục ghi nhận vị trí gốc tham chiếu 0%
-                    brake_reference_turns_[i] = state->axes[i].position / (2.0f * 3.141592f);
-                    brake_reference_valid_[i] = true;
-                }
                 ctrl->axes[i].motion_enable = false;
                 request_axis_state(i, AxisDesiredState::Idle);
                 ctrl->axes[i].target = 0.0f;
@@ -1304,6 +1328,11 @@ namespace hardware_system_handler
                 interface == CommandInterface::Velocity)
             {
                 target = target / (2.0f * 3.141592f);
+            }
+            if (is_brake_axis)
+            {
+                // Giới hạn an toàn tuyệt đối hành trình phanh: 0.0 đến 3.0 vòng từ gốc homing
+                target = std::clamp(target, 0.0f, 3.0f);
             }
             ctrl->axes[i].motion_enable = true;
             request_axis_state(i, AxisDesiredState::ClosedLoop);

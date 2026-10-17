@@ -64,6 +64,19 @@ ament_target_dependencies(test_system_behavior
   hardware_ipc_common
 )
 
+add_executable(test_homing_behavior
+  src/test_homing_behavior.cpp
+)
+
+target_link_libraries(test_homing_behavior
+  ${PROJECT_NAME}
+)
+
+ament_target_dependencies(test_homing_behavior
+  rclcpp
+  hardware_ipc_common
+)
+
 add_executable(shm_viewer
   src/shm_viewer.cpp
 )
@@ -87,7 +100,7 @@ install(
 )
 
 install(
-  TARGETS hsh_node test_system_behavior shm_viewer
+  TARGETS hsh_node test_system_behavior test_homing_behavior shm_viewer
   DESTINATION lib/${PROJECT_NAME}
 )
 

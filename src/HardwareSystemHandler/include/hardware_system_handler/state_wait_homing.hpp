@@ -9,27 +9,31 @@ class OFFLINE;
 
 class WAIT_HOMING : public HshFsm {
 public:
-    void entry() {
+    void entry() override {
         motion_allowed_ = false;
         RCLCPP_INFO(logger_, "WAIT HOMING State");
     }
 
-    void exit() {}
+    void exit() override {}
 
-    void react(EvHomingDone const&) {
+    void react(EvHomingDone const&) override {
         transit<READY>();
     }
 
-    void react(EvHomingTimeout const&) {
+    void react(EvHomingTimeout const&) override {
         transit<STOP>();
     }
 
-    void react(EvAxisError const&) {
+    void react(EvAxisError const&) override {
         transit<STOP>();
     }
 
-    void react(EvAxisOffline const&) {
+    void react(EvAxisOffline const&) override {
         transit<OFFLINE>();
+    }
+
+    void react(EvCriticalError const&) override {
+        transit<STOP>();
     }
 
     template <typename Event>

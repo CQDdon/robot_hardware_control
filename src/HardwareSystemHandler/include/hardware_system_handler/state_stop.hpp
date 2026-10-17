@@ -3,7 +3,7 @@
 #include "hardware_system_handler/fsm.hpp"
 
 // Forward declaration
-class READY;
+class WAIT_HOMING;
 
 class STOP : public HshFsm
 {
@@ -18,8 +18,8 @@ public:
 
     void react(EvEStopReset const &) override
     {
-        RCLCPP_INFO(logger_, "STOP State: E-Stop reset conditions met -> Transitioning to READY");
-        transit<READY>();
+        RCLCPP_INFO(logger_, "STOP State: E-Stop reset conditions met -> Transitioning to WAIT_HOMING");
+        transit<WAIT_HOMING>();
     }
 
     template <typename Event>

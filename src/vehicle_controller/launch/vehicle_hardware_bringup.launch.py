@@ -27,7 +27,7 @@ def generate_launch_description():
         package='hardware_system_handler',
         executable='hsh_node',
         name='hsh_node',
-        parameters=[{'bypass_position_homing': True}],
+        parameters=[{'bypass_position_homing': False}],
         output='screen',
     )
     joint_state_broadcaster = Node(

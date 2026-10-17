@@ -185,15 +185,12 @@ void VehicleController::set_position_command(double position_percentage, bool fo
   }
 
   const double requested_percentage_val = force_engaged ? 100.0 : requested_percentage;
-  if (!position_reference_valid_) {
-    for (size_t i = 0; i < brake_count; ++i) {
-      position_reference_rad_[i] = state_interfaces_[2 * i].get_value();
-    }
-    position_reference_valid_ = true;
-  }
-  const double offset_rad = position_max_offset_turns_ * requested_percentage_val / 100.0 * 2.0 * M_PI;
+  // Điều khiển vị trí tuyệt đối từ gốc Homing 0.0 rad (cảm biến tiệm cận):
+  // 0% -> 0.0 vòng (IDLE nhả phanh)
+  // 100% -> position_max_offset_turns_ (3.0 vòng)
+  const double target_rad = position_max_offset_turns_ * (requested_percentage_val / 100.0) * 2.0 * M_PI;
   for (size_t i = 0; i < brake_count; ++i) {
-    command_interfaces_[i].set_value(position_reference_rad_[i] + offset_rad);
+    command_interfaces_[i].set_value(target_rad);
     command_interfaces_[idle_offset + i].set_value(0.0);
   }
 }
